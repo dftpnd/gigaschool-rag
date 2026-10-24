@@ -1,0 +1,20 @@
+# материалы курса — не публикуем
+docs/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.ipynb_checkpoints/
+
+# секреты
+.env
+*.session
+cookies.txt
+
+# тяжёлые артефакты и кэши
+cache/
+.cache/
+*.parquet
+*.npy
+qdrant_storage/
