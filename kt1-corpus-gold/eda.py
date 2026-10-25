@@ -22,6 +22,7 @@
 
 # %%
 import hashlib
+import html
 import json
 import re
 from collections import Counter
@@ -47,7 +48,16 @@ df = pd.DataFrame([json.loads(l) for l in corpus_bytes.decode("utf-8").splitline
 assert df["doc_id"].is_unique
 df["date"] = pd.to_datetime(df["date"])
 TAG_RE = re.compile(r"<[^>]+>")
-df["visible"] = df["text"].map(lambda t: re.sub(r"\s+", " ", TAG_RE.sub(" ", t)).strip())
+ENTITY_RE = re.compile(r"&(?:[a-zA-Z][a-zA-Z0-9]*|#\d+|#[xX][0-9a-fA-F]+);")
+
+
+def visible_text(raw: str) -> str:
+    """Видимый текст: теги → пробел, затем декодирование HTML-сущностей (&nbsp;, &quot;, &#8212; …)."""
+    return re.sub(r"\s+", " ", html.unescape(TAG_RE.sub(" ", raw))).strip()
+
+
+df["visible"] = df["text"].map(visible_text)
+print("документов с HTML-сущностями:", df["text"].str.contains(ENTITY_RE).sum())
 print(len(df), "документов, sha256 корпуса:", CORPUS_SHA[:16])
 
 
@@ -88,8 +98,9 @@ plt.tight_layout()
 from transformers import AutoTokenizer
 
 TOKENIZER = "BAAI/bge-m3"
-tok = AutoTokenizer.from_pretrained(TOKENIZER)
-len_cache = cache_path("token_lens", "parquet", tokenizer=TOKENIZER)
+TOKENIZER_REV = "5617a9f61b028005a4858fdac845db406aefb181"  # фиксированный commit на Hugging Face
+tok = AutoTokenizer.from_pretrained(TOKENIZER, revision=TOKENIZER_REV)
+len_cache = cache_path("token_lens", "parquet", tokenizer=TOKENIZER, revision=TOKENIZER_REV, visible="unescape-v1")
 if len_cache.exists():
     lens = pd.read_parquet(len_cache)
 else:
@@ -145,7 +156,8 @@ display(df.nlargest(5, "tok_visible")[["source", "tok_visible", "tok_raw", "titl
 # Доли считаются **в токенах BGE-M3** — тех же единицах, что и длины выше, то есть это доля
 # входного окна модели. Каждому символу сырого текста присваивается класс, токен получает класс
 # своего первого символа (по `offset_mapping` токенизатора). Приоритет классов при пересечении:
-# URL (в том числе в `href`/`src`) > HTML-тег > эмодзи > число > пунктуация > прочий спецсимвол > буквы.
+# URL (в том числе в `href`/`src`) > HTML-тег или HTML-сущность (`&nbsp;`) > эмодзи > число > пунктуация >
+# прочий спецсимвол > буквы.
 #
 # * **Удаляемый шум** — кандидаты на удаление в КТ 2: HTML, URL, эмодзи, прочие спецсимволы
 #   (`|`, `#`, `@`, `→`, декоративные символы).
@@ -171,8 +183,9 @@ def char_classes(text: str) -> np.ndarray:
             codes[m.start():m.end()] = code
     for e in emoji.emoji_list(text):
         codes[e["match_start"]:e["match_end"]] = 5
-    for m in TAG_RE.finditer(text):
-        codes[m.start():m.end()] = 6
+    for rx in (TAG_RE, ENTITY_RE):
+        for m in rx.finditer(text):
+            codes[m.start():m.end()] = 6
     for m in URL_RE.finditer(text):
         codes[m.start():m.end()] = 7
     return codes
@@ -186,7 +199,7 @@ def token_class_counts(text: str) -> np.ndarray:
     return np.bincount(char_classes(text)[starts], minlength=len(CLASSES))
 
 
-noise_cache = cache_path("token_classes", "parquet", tokenizer=TOKENIZER, classes=CLASSES,
+noise_cache = cache_path("token_classes", "parquet", tokenizer=TOKENIZER, revision=TOKENIZER_REV, classes=CLASSES, entity=ENTITY_RE.pattern,
                          spans=[r.pattern for _, r in SPAN_RES], url=URL_RE.pattern)
 if noise_cache.exists():
     noise = pd.read_parquet(noise_cache)
@@ -235,8 +248,9 @@ flags = pd.DataFrame({
 # Только фиксируем, ничего не удаляем (удаление — шаг предобработки КТ 2).
 # * **Точные** — совпадение видимого текста после приведения к нижнему регистру и схлопывания пробелов.
 # * **Почти-дубликаты** — пары с Jaccard ≥ 0.8 по множествам словесных 3-грамм. MinHash LSH
-#   (128 перестановок) используется только для генерации кандидатов — это вероятностный фильтр,
-#   поэтому для каждой пары-кандидата Jaccard пересчитывается точно и пары ниже порога отбрасываются.
+#   (128 перестановок) используется только для генерации кандидатов, причём с заниженным порогом 0.5:
+#   LSH ошибается в обе стороны, и при пороге, равном итоговому, часть настоящих пар не попадает в кандидаты.
+#   Для каждой пары-кандидата Jaccard пересчитывается точно, пары ниже 0.8 отбрасываются.
 #   Документы короче 5 слов не участвуют — у них почти нет шинглов.
 
 # %%
@@ -250,35 +264,66 @@ top = df.loc[h.isin(dup_groups.nlargest(6).index)].groupby(h)["visible"].agg(["s
 top
 
 # %%
-JACCARD = 0.8
+JACCARD = 0.8              # итоговый порог почти-дубликата (точный Jaccard)
+CAND_THRESHOLDS = [0.4, 0.5, 0.6, 0.7, 0.8]
+CAND_THRESHOLD = 0.5       # порог LSH для кандидатов — заметно ниже итогового, чтобы не терять пары
+NUM_PERM = 128
 words = norm.str.findall(r"\w+")
 shingles = {d: {" ".join(w[j:j + 3]) for j in range(len(w) - 2)} for d, w in zip(df["doc_id"], words) if len(w) >= 5}
-mh_cache = cache_path("near_dup_pairs", "json", shingle=3, min_words=5, num_perm=128, threshold=JACCARD)
+mh_cache = cache_path("near_dup_candidates", "json", shingle=3, min_words=5, num_perm=NUM_PERM, seed=1,
+                      thresholds=CAND_THRESHOLDS, visible="unescape-v1")
 if mh_cache.exists():
-    cand = json.loads(mh_cache.read_text())
+    lsh_runs = json.loads(mh_cache.read_text())
 else:
-    lsh = MinHashLSH(threshold=JACCARD, num_perm=128)
     mhs = {}
     for d, sh in shingles.items():
-        m = MinHash(num_perm=128, seed=1)
+        m = MinHash(num_perm=NUM_PERM, seed=1)
         m.update_batch([x.encode() for x in sh])
         mhs[d] = m
-        lsh.insert(d, m)
-    cand = sorted({tuple(sorted((d, o))) for d, m in mhs.items() for o in lsh.query(m) if o != d})
-    mh_cache.write_text(json.dumps(cand, ensure_ascii=False))
+    lsh_runs = {}
+    for t in CAND_THRESHOLDS:
+        lsh = MinHashLSH(threshold=t, num_perm=NUM_PERM)
+        for d, m in mhs.items():
+            lsh.insert(d, m)
+        cand_t = sorted({tuple(sorted((d, o))) for d, m in mhs.items() for o in lsh.query(m) if o != d})
+        lsh_runs[str(t)] = {"b": lsh.b, "r": lsh.r, "pairs": cand_t}
+    mh_cache.write_text(json.dumps(lsh_runs, ensure_ascii=False))
 
-jac = lambda a, b: len(shingles[a] & shingles[b]) / len(shingles[a] | shingles[b])
+jac_cache = {}
+def jac(a, b):
+    if (a, b) not in jac_cache:
+        jac_cache[(a, b)] = len(shingles[a] & shingles[b]) / len(shingles[a] | shingles[b])
+    return jac_cache[(a, b)]
+
 hash_by_id = dict(zip(df["doc_id"], h))
-cand = [(a, b, jac(a, b)) for a, b in cand if hash_by_id[a] != hash_by_id[b]]  # точные посчитаны выше
+not_exact = lambda a, b: hash_by_id[a] != hash_by_id[b]  # точные дубликаты посчитаны выше
+
+# Чувствительность к порогу LSH: сколько пар с точным Jaccard ≥ 0.8 находится при каждом пороге кандидатов
+# и какова теоретическая вероятность, что пара ровно с J = 0.8 станет кандидатом: 1 − (1 − J^r)^b.
+sens = []
+for t in CAND_THRESHOLDS:
+    run = lsh_runs[str(t)]
+    c = [(a, b) for a, b in run["pairs"] if not_exact(a, b)]
+    ok = [(a, b) for a, b in c if jac(a, b) >= JACCARD]
+    sens.append({"порог LSH": t, "bands b": run["b"], "rows r": run["r"],
+                 "P(кандидат | J=0.8)": round(1 - (1 - JACCARD ** run["r"]) ** run["b"], 4),
+                 "кандидатов": len(c), "подтверждено J≥0.8": len(ok)})
+display(pd.DataFrame(sens))
+
+cand = [(a, b, jac(a, b)) for a, b in lsh_runs[str(CAND_THRESHOLD)]["pairs"] if not_exact(a, b)]
 pairs = [(a, b, j) for a, b, j in cand if j >= JACCARD]
 near_ids = {d for a, b, _ in pairs for d in (a, b)}
-print(f"Кандидатов от LSH (не точных): {len(cand)}, из них подтверждено точным Jaccard ≥ {JACCARD}: {len(pairs)} "
-      f"(отброшено {len(cand) - len(pairs)}, минимальный Jaccard среди отброшенных: "
-      f"{min((j for *_, j in cand if j < JACCARD), default=float('nan')):.3f})")
-print(f"Затронуто документов: {len(near_ids)} ({len(near_ids)/len(df)*100:.1f}%)")
+print(f"Порог кандидатов {CAND_THRESHOLD}: {len(cand)} кандидатов (не точных), подтверждено точным Jaccard ≥ {JACCARD}: "
+      f"{len(pairs)} пар, затронуто документов: {len(near_ids)} ({len(near_ids)/len(df)*100:.1f}%)")
 src = dict(zip(df["doc_id"], df["source"]))
 pair_src = Counter(" ↔ ".join(sorted({src[a], src[b]})) if src[a] != src[b] else src[a] for a, b, _ in pairs)
 pd.Series(pair_src, name="пар").sort_values(ascending=False).to_frame()
+
+# %% [markdown]
+# LSH — вероятностный метод, поэтому найденные пары — оценка снизу. Полнота обосновывается двумя способами:
+# теоретическая вероятность пропустить пару с J ≥ 0.8 при выбранном пороге кандидатов (столбец
+# `P(кандидат | J=0.8)`; для J > 0.8 она ещё выше) и выход числа подтверждённых пар на плато при снижении
+# порога LSH — дальнейшее снижение добавляет только кандидатов ниже 0.8, но не новые настоящие пары.
 
 # %%
 vis = dict(zip(df["doc_id"], df["visible"]))
@@ -290,24 +335,26 @@ for a, b, j in [pairs[i] for i in rng.choice(len(pairs), size=min(4, len(pairs))
 # ## 5. Тематические кластеры
 #
 # Видимый текст (первые 512 токенов) кодируется моделью `intfloat/multilingual-e5-small`
-# (на GPU, если он есть), затем KMeans. Ключевые слова кластера — TF-IDF по «склеенному» тексту кластера,
-# где слова, встречающиеся в большинстве кластеров, отсекаются (`max_df`).
+# (на GPU, если он есть), затем KMeans. Ключевые слова кластера — c-TF-IDF: насколько термин
+# характерен именно для этого кластера по сравнению со всем корпусом.
 # Это разведочный анализ: цель — увидеть, из каких тем состоит корпус, а не выбрать модель.
 
 # %%
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import KMeans
-from sklearn.feature_extraction.text import TfidfVectorizer
+from scipy.sparse import csr_matrix
+from sklearn.feature_extraction.text import CountVectorizer
 
 import torch
 
 EMB_MODEL = "intfloat/multilingual-e5-small"
+EMB_REV = "614241f622f53c4eeff9890bdc4f31cfecc418b3"  # фиксированный commit на Hugging Face
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"  # на CPU тот же результат, но заметно дольше
-emb_cache = cache_path("emb", "npy", model=EMB_MODEL, max_seq_length=512, prefix="passage: ")
+emb_cache = cache_path("emb", "npy", model=EMB_MODEL, revision=EMB_REV, max_seq_length=512, prefix="passage: ", visible="unescape-v1")
 if emb_cache.exists():
     emb = np.load(emb_cache)
 else:
-    model = SentenceTransformer(EMB_MODEL, device=DEVICE)
+    model = SentenceTransformer(EMB_MODEL, revision=EMB_REV, device=DEVICE)
     model.max_seq_length = 512
     emb = model.encode(["passage: " + t for t in df["visible"]], batch_size=128, normalize_embeddings=True, show_progress_bar=False)
     np.save(emb_cache, emb)
@@ -321,13 +368,22 @@ STOP = set("""и в во не что он на я с со как а то все 
 этот того потому этого какой совсем ним здесь этом один почти мой тем чтобы нее сейчас были куда зачем всех никогда можно при
 наконец два об другой хоть после над больше тот через эти нас про всего них какая много разве три эту моя впрочем хорошо свою
 этой перед иногда лучше чуть том нельзя такой им более всегда конечно всю между это the of to and in is for on""".split())
-docs_by_cl = df.groupby("cluster")["visible"].apply(lambda s: " ".join(s.str.lower()))
-vec = TfidfVectorizer(max_df=0.5, min_df=2, token_pattern=r"(?u)\b[^\W\d_]{3,}\b", stop_words=list(STOP), max_features=50000)
-X = vec.fit_transform(docs_by_cl)
+# c-TF-IDF (как в BERTopic): частота термина в кластере × log(1 + A / частота термина во всём корпусе),
+# A — среднее число слов в кластере. Редкие опечатки отсекаются по документам (min_df=3 документа),
+# а не по кластерам — так термины, характерные только для одного кластера, сохраняются.
+# Слова из подписей каналов и названия игры встречаются почти в каждом посте и забивают верх
+# любого кластера Telegram — для названий тем они бесполезны (как шаблонный текст они разобраны выше).
+BOILERPLATE = {"gabe", "news", "dota", "доты", "доте", "доту", "дота"}
+vec = CountVectorizer(lowercase=True, min_df=3, token_pattern=r"(?u)\b[^\W\d_]{3,}\b", stop_words=sorted(STOP | BOILERPLATE))
+counts = vec.fit_transform(df["visible"])
+onehot = csr_matrix((np.ones(len(df)), (df["cluster"].values, np.arange(len(df)))), shape=(K, len(df)))
+tf_cl = (onehot @ counts).toarray().astype(float)
+words_per_cl = tf_cl.sum(axis=1, keepdims=True)
+ctfidf = (tf_cl / words_per_cl) * np.log1p(words_per_cl.mean() / tf_cl.sum(axis=0, keepdims=True))
 terms = np.array(vec.get_feature_names_out())
 clusters = pd.DataFrame({
     "docs": df.groupby("cluster").size(),
-    "top_terms": [", ".join(terms[np.argsort(-X[i].toarray()[0])[:10]]) for i in range(K)],
+    "top_terms": [", ".join(terms[np.argsort(-ctfidf[i])[:10]]) for i in range(K)],
 })
 clusters = clusters.join((pd.crosstab(df["cluster"], df["source"], normalize="index") * 100).round(0))
 clusters.sort_values("docs", ascending=False)
@@ -380,49 +436,58 @@ pd.Series(summary).to_frame("значение")
 # ## 7. Выводы
 #
 # **1. Типичный размер документа и разброс.** Распределение резко неоднородное, с тяжёлым хвостом:
-# медиана — 58 токенов видимого текста, но стандартное отклонение ~720.
+# медиана — 58 токенов видимого текста, стандартное отклонение ~580.
 # * Комментарии dota2.ru — медиана 21 токен, 84% короче 50 токенов (часто это реплика из пары слов: «+1», «Почему?»).
-# * Посты Telegram — медиана 57–80 токенов, длинных почти нет (максимум < 1000).
+# * Посты Telegram — медиана 57–79 токенов, длинных почти нет (максимум < 1000).
 # * Блоки патчноутов — медиана 54, но 46% короче 50 (одна правка одного предмета) и редкие крупные блоки
 #   (масштабные патчи 7.36/7.38/7.41 — до 2,2 тыс. токенов на героя).
-# * Статьи dota2.ru — всего 36 документов (0,2% корпуса), но 18% всех токенов видимого текста: медиана 4,1 тыс.,
-#   максимум 55 тыс. токенов; 97% длиннее 2000. Это полные пересказы патчноутов.
+# * Статьи dota2.ru — всего 36 документов (0,2% корпуса), но 15% всех токенов видимого текста: медиана 3,3 тыс.,
+#   максимум 46 тыс. токенов, 30 из 36 длиннее 2000. Это полные пересказы патчноутов.
 #
-# В итоге 40,6% документов короче 50 токенов, а 0,2% (все — статьи) длиннее 2000.
+# В итоге 40,6% документов короче 50 токенов, а длиннее 2000 — 33 документа (0,2%): 30 статей и 3 блока патчноутов.
 #
 # **2. Основной шум.** Доли — в токенах BGE-M3, то есть в долях входного окна модели.
-# * **Удаляемый шум — 82% токенов сырого корпуса**, и почти весь он — HTML-разметка (78%):
-#   `<i class="emoji">`, `<b>`, `<a href>`, `<br>`, обёртки комментариев. Именно поэтому сырой корпус
-#   в 5 раз длиннее видимого текста (10,6 млн токенов против 2,1 млн). В Telegram и статьях удаляемого шума
-#   84–87% и 81%, в комментариях — 59%, в патчноутах — 5% (они пришли из JSON почти чистыми).
+# * **Удаляемый шум — 82,5% токенов сырого корпуса**, и почти весь он — HTML-разметка и HTML-сущности (79%):
+#   `<i class="emoji">`, `<b>`, `<a href>`, `<br>`, `&nbsp;`, обёртки комментариев. Поэтому сырой корпус
+#   в 5,3 раза длиннее видимого текста (10,6 млн токенов против 2,02 млн). В Telegram удаляемого шума 84–87%,
+#   в статьях — 84%, в комментариях — 59%, в патчноутах — 5% (они пришли из JSON почти чистыми).
+# * HTML-сущности (`&nbsp;`, `&quot;`, `&#8212;` …) есть в 331 документе. Их нужно декодировать, а не просто
+#   вырезать теги: иначе `&nbsp;` превращается в три ложных фрагмента и раздувает длины (на статьях — на ~20%).
 # * Остальной удаляемый шум мал по объёму, но встречается почти везде: ссылки — 2% токенов, но они есть
 #   в 92–94% постов Telegram (подпись канала, промо-ссылки); эмодзи — 1% токенов, но есть в 99,6% постов
-#   (рубрики-заголовки); декоративные спецсимволы — 1%.
+#   (рубрики-заголовки); декоративные спецсимволы — 0,6%.
 # * Числа — 1% токенов корпуса, но 11% токенов патчноутов, и это не шум, а суть правки
-#   («урон увеличен с 75 до 80»): при чистке их удалять нельзя. Пунктуация (2%) — тоже не шум.
-# * Шаблонный текст, который регулярным шумом не ловится: подписи каналов («Gabe News | Dota 2», «@Dota2»),
-#   рубрики-шаблоны («Еженедельный мета-отчёт»), удалённые и пустые комментарии (только картинка или цитата).
+#   («урон увеличен с 75 до 80»): при чистке их удалять нельзя. Пунктуация (1,7%) — тоже не шум.
+# * Шаблонный текст, который символьными правилами не ловится: подписи каналов («Gabe News | Dota 2», «@Dota2») —
+#   настолько частые, что без отдельного стоп-списка они занимают верх ключевых слов любого кластера Telegram;
+#   рубрики-шаблоны («Еженедельный мета-отчёт»); удалённые и пустые комментарии (только картинка или цитата).
+# * Скрытая реклама: регулярка по букмекерским словам находит лишь ~1% постов, но кластеризация выделила
+#   отдельный кластер (~1,8 тыс. постов @gabenews) розыгрышей и промо бота-предиктора. Это тоже кандидат на фильтрацию в КТ 2.
 # * Дубликаты: 2,2% лишних точных копий (больше всего — шаблонные посты @Dota2 и «Данный комментарий был удалён»).
-#   Ещё 1,6% документов (178 пар) — почти-дубликаты с подтверждённым Jaccard ≥ 0,8: в основном отредактированные
-#   и перепощенные посты одного канала. LSH дал 202 кандидата, 24 из них после точной проверки отброшены.
-# * Реклама ставок оказалась редкой (~1% постов) — каналы отфильтрованы по теме.
+#   Ещё 1,7% документов (191 пара) — почти-дубликаты с подтверждённым Jaccard ≥ 0,8: в основном отредактированные
+#   и перепощенные посты одного канала. Число пар выходит на плато уже при пороге кандидатов LSH 0,6
+#   (а при итоговом пороге 0,8 LSH нашёл бы лишь 178 из 191), поэтому оценка близка к полной.
 #
 # **3. Тематические кластеры.** Эмбеддинги разделяют корпус прежде всего по **стилю источника** —
 # патчноуты, посты Telegram и комментарии почти не смешиваются в одном кластере, — а уже внутри по теме:
-# * изменения способностей, героев и предметов — патчноуты (три кластера, все на 98–100% из патчноутов);
-# * турниры, расписания, результаты; карьеры игроков и интервью; розыгрыши и призовые фонды;
-# * мета и статистика: винрейты, пикрейты, «худшие и лучшие герои на ранге» — регулярные посты-шаблоны;
-# * советы, билды, механики; косметика, мемы, косплей, хайлайты;
-# * обновления в процессе: staging-сервер, компендиум, ночные патчи;
-# * реакции форума — жалобы на нерфы, короткие эмоции и сленг («пач», «порезали», «вольво»).
+# * правки баланса — патчноуты: цифры способностей и предметов, таланты (два кластера, 96–99% патчноутов);
+# * пересказы патчей в Telegram: аспекты, нейтральные предметы, скилпоинты — те же факты другим языком;
+# * выход и ожидание обновлений, датамайнинг, разработчики Valve;
+# * турниры, составы и результаты; интервью и мнения про-игроков; про-игроки и керри-герои;
+# * статистика: винрейты, MMR, «сильнейший герой по данным Dotabuff»;
+# * баги, фишки и механики («знали об этом?»); контент стримеров;
+# * косметика: сеты, мастерская, Steam; розыгрыши и промо бота-предиктора;
+# * форум: развёрнутые обсуждения нерфов и короткие реакции, удалённые комментарии («апнули», «понерфили», «найс»).
 #
 # **4. Проблемы для чанкинга и ретрива.**
 # * **Один размер чанка не подходит никому:** статьи надо резать, а 40% документов и так короче 50 токенов —
 #   фиксированный чанк в 512 токенов для них бессмыслен, а короткие комментарии без контекста статьи
 #   («что с ним») почти не несут информации — понадобятся метаданные (к какому патчу/статье относится).
-# * **Без удаления HTML** 4/5 embedding-окна занято разметкой, а BM25 индексирует имена классов и атрибутов.
+# * **Без удаления HTML и декодирования сущностей** 4/5 embedding-окна занято разметкой,
+#   а BM25 индексирует имена классов, атрибутов и обломки сущностей.
 # * **SentenceChunker** будет ошибаться на постах Telegram: предложения там разделены эмодзи, а не точками.
-# * **Шаблонные посты и дубликаты** будут занимать несколько мест в top-k одинаковым текстом.
+# * **Шаблонные посты, подписи и дубликаты** будут занимать несколько мест в top-k одинаковым текстом;
+#   подписи каналов вдобавок сближают эмбеддинги несвязанных постов одного канала.
 # * **Один факт — несколько источников:** правка есть в патчноуте, в статье, в пересказе Telegram и
 #   в обсуждении. В gold-наборе нужно указывать все релевантные документы, иначе Recall занизится.
 # * **Разные формы имён:** в патчноутах (русская локализация Valve) имена героев и предметов английские

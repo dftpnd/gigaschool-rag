@@ -9,6 +9,7 @@
 """
 
 import hashlib
+import html
 import json
 import random
 import re
@@ -217,7 +218,7 @@ def tg_posts(channel):
 def tg_docs(since_date, topic_re):
     for ch in sorted(p.name for p in (RAW / "telegram").iterdir()):
         posts = [p for p in tg_posts(ch) if p["date"] and p["date"] >= since_date and p["text"]]
-        plain = lambda p: re.sub(r"<[^>]+>", " ", p["text"]).lower()
+        plain = lambda p: html.unescape(re.sub(r"<[^>]+>", " ", p["text"])).lower()
         topical = [p for p in posts if topic_re.search(plain(p))]
         rest = [p for p in posts if not topic_re.search(plain(p))]
         # свой генератор на канал и популяция в фиксированном порядке (по doc_id) —
