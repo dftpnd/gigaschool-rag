@@ -44,6 +44,7 @@ SEED_DOC_CHARS = 1500             # обрезка документа-затра
 PER_RETRIEVER_K = 10              # кандидатов отрывков на (поисковик × запрос)
 MAX_JUDGED = 40                   # потолок отрывков на вопрос для судьи (плюс отрывки затравок)
 DUPLICATE_QUESTION_JACCARD = 0.6  # вопросы с таким сходством биграмм слов считаются дублями
+MIN_EVIDENCE_CHARS = 40           # отрывок короче не может сам по себе подтверждать ответ
 # Стили на 20 кандидатов: опечатки ~15%, остальные стили по 10%, ~45% без изменений.
 STYLE_CYCLE = ["typo"] * 3 + ["colloquial", "name_variant", "short", "long"] * 2 + [""] * 9
 EMBEDDERS = {  # модель → (ревизия, префикс запроса, префикс отрывка, размер батча)
@@ -259,26 +260,56 @@ def stage_review() -> None:
 
 # ---------- finalize ----------
 
-def to_gold_item(record: dict, qid: str) -> GoldItem:
+def apply_overrides(labels: list[dict], overrides: list[dict]) -> list[dict]:
+    """Правки ревьюера поверх разметки судьи: оценка и цитата отрывка заменяются или добавляются."""
+    by_passage = {x["passage_id"]: x for x in labels}
+    for o in overrides:
+        by_passage[o["passage_id"]] = {"passage_id": o["passage_id"], "doc_id": o["passage_id"].rsplit("#", 1)[0],
+                                       "grade": o["grade"], "quote": o.get("quote", "")}
+    return list(by_passage.values())
+
+
+def is_substantive(passage_text: str) -> bool:
+    """Отрывок достаточно длинный, чтобы сам по себе служить доказательством (а не «100%» или «+1»)."""
+    return len(passage_text) >= MIN_EVIDENCE_CHARS
+
+
+def to_gold_item(record: dict, decision: dict, qid: str, passage_text: dict[str, str]) -> GoldItem:
+    labels = apply_overrides(record["labels"], decision.get("evidence_overrides", []))
+    kept = [x for x in labels if x["grade"] >= 1 and is_substantive(passage_text[x["passage_id"]])]
     evidence = tuple(Evidence(x["passage_id"], x["doc_id"], x["grade"], x["quote"])
-                     for x in sorted(record["labels"], key=lambda x: (-x["grade"], x["passage_id"])) if x["grade"] >= 1)
-    return GoldItem(qid=qid, qtype=record["qtype"], question=record["question"], answer=record["answer"],
-                    evidence=evidence, styles=tuple(record["styles"]), original_question=record["original_question"],
-                    seed_docs=tuple(record["seed_docs"]))
+                     for x in sorted(kept, key=lambda x: (-x["grade"], x["passage_id"])))
+    return GoldItem(qid=qid, qtype=record["qtype"], question=decision.get("question", record["question"]),
+                    answer=decision.get("answer", record["answer"]), evidence=evidence, styles=tuple(record["styles"]),
+                    original_question=record["original_question"], seed_docs=tuple(record["seed_docs"]))
+
+
+def check_item(item: GoldItem) -> None:
+    """Инварианты набора: у негативного вопроса нет релевантных отрывков, у остальных — есть."""
+    has_relevant = bool(item.relevant_docs())
+    if (item.qtype == "negative") == has_relevant:
+        raise ValueError(f"{item.qid}: тип {item.qtype}, релевантных документов {len(item.relevant_docs())}")
 
 
 def stage_finalize() -> None:
+    docs, _ = load_corpus()
+    passage_text = {p.passage_id: p.text for p in corpus_passages(docs.values())}
     records = {r["cid"]: r for r in read_stage("labeled")}
     decisions = json.loads(REVIEW_FILE.read_text(encoding="utf-8"))
-    accepted = [records[cid] for cid in sorted(decisions) if decisions[cid]["decision"] == "accept"]
-    by_type = {t: [r for r in accepted if r["qtype"] == t][:q] for t, q in QUOTAS.items()}
-    chosen = [r for t in QUOTAS for r in by_type[t]]
-    items = [to_gold_item(r, f"q{i:02d}") for i, r in enumerate(chosen, start=1)]
+    accepted = [cid for cid in sorted(decisions) if decisions[cid]["decision"] == "accept"]
+    per_type = Counter(records[cid]["qtype"] for cid in accepted)
+    if per_type != Counter(QUOTAS):
+        raise ValueError(f"принятых по типам {dict(per_type)}, нужно {QUOTAS}")
+    ordered = sorted(accepted, key=lambda cid: (list(QUOTAS).index(records[cid]["qtype"]), cid))
+    items = [to_gold_item(records[cid], decisions[cid], f"q{i:02d}", passage_text)
+             for i, cid in enumerate(ordered, start=1)]
+    for item in items:
+        check_item(item)
     split = stratified_split(items, TEST_SHARE, SEED)
     items = [replace(i, split=split[i.qid]) for i in items]
     save_gold(items, GOLD_DIR / "gold.jsonl")
     print(Counter((i.qtype, i.split) for i in items))
-    print("не вошли сверх квоты:", [r["cid"] for r in accepted if r not in chosen])
+    print(Counter(d["decision"] for d in decisions.values()))
 
 
 # ---------- отчёт о стоимости ----------
