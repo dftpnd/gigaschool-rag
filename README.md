@@ -13,3 +13,19 @@
 | Финальный отчёт | [`final-report/`](final-report/) |
 
 План и чек-листы — [PLAN.md](PLAN.md).
+
+## Код
+
+```
+src/gigarag/     общая библиотека: регулярки (patterns.py), текст, шум, дубликаты, темы, кэш, источники корпуса
+kt<N>-<тема>/    одна контрольная точка: README, ноутбуки, scripts/ (тонкие CLI), data/ (вне git)
+tests/           pytest на функции библиотеки
+```
+
+Правила кода и воспроизводимости — [CLAUDE.md](CLAUDE.md).
+
+```bash
+uv sync                                   # окружение (Linux — PyTorch с CUDA 12.8, иначе PyPI)
+uv run ruff check src tests kt*/scripts kt*/*.py
+uv run pytest
+```

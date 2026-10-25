@@ -1,0 +1,70 @@
+[project]
+name = "gigaschool-rag"
+version = "0.1.0"
+description = "Сквозной RAG-проект курса LLM-инженер (GigaSchool)"
+requires-python = ">=3.12"
+dependencies = [
+    "datasketch>=2.0.0",
+    "emoji>=2.16.0",
+    "httpx>=0.27",
+    "ipykernel>=7.4.0",
+    "jupyter>=1.1.1",
+    "jupytext>=1.19.6",
+    "matplotlib>=3.11.2",
+    "nbconvert>=7.17.2",
+    "nbformat>=5.11.1",
+    "pandas>=3.1.0",
+    "pyarrow>=26.0.0",
+    "rank-bm25>=0.2.2",
+    "scikit-learn>=1.9.1",
+    "selectolax>=0.3",
+    "sentence-transformers>=6.2.0",
+    "threadpoolctl>=3.7.0",
+    "torch>=2.11.0",
+    "transformers>=5.20.2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gigarag"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-include = ["*.ipynb"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "C4", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]  # кириллица в строках и комментариях — норма для проекта
+
+[tool.ruff.lint.per-file-ignores]
+# Ноутбуки: импорты внутри ячеек, встроенный display и выражение в конце ячейки как её вывод.
+"kt*/*.py" = ["E402", "B018"]
+"*.ipynb" = ["E402", "B018", "F821"]
+"kt*/eda.py" = ["E402", "B018", "F821"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["gigarag", "settings"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.uv.sources]
+# Linux — сборка с CUDA 12.8 (RTX 50xx); macOS и прочие — обычные колёса PyPI (CPU/MPS)
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.17.2",
+]
