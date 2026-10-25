@@ -18,9 +18,38 @@ dependencies = [
     "scikit-learn>=1.9.1",
     "selectolax>=0.3",
     "sentence-transformers>=6.2.0",
+    "threadpoolctl>=3.7.0",
     "torch>=2.11.0",
     "transformers>=5.20.2",
 ]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gigarag"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-include = ["*.ipynb"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "C4", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]  # кириллица в строках и комментариях — норма для проекта
+
+[tool.ruff.lint.per-file-ignores]
+# Ноутбуки: импорты внутри ячеек, встроенный display и выражение в конце ячейки как её вывод.
+"kt*/*.py" = ["E402", "B018"]
+"*.ipynb" = ["E402", "B018", "F821"]
+"kt*/eda.py" = ["E402", "B018", "F821"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["gigarag", "settings"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.uv.sources]
 # Linux — сборка с CUDA 12.8 (RTX 50xx); macOS и прочие — обычные колёса PyPI (CPU/MPS)
@@ -32,3 +61,9 @@ torch = [
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.17.2",
+]

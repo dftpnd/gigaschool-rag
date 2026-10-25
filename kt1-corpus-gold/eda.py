@@ -2,6 +2,11 @@
 # jupyter:
 #   jupytext:
 #     formats: ipynb,py:percent
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.19.6
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -21,61 +26,54 @@
 # 4. Какие проблемы это создаст для чанкинга и ретрива?
 
 # %%
-import hashlib
-import html
-import json
-import re
 from collections import Counter
 from pathlib import Path
 
-import emoji
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from datasketch import MinHash, MinHashLSH
+
+import gigarag.noise
+import gigarag.patterns
+import gigarag.text
+from gigarag import dedup, noise, patterns, stats, topics
+from gigarag.cache import (
+    CacheStore,
+    code_fingerprint,
+    load_or_compute,
+    read_json,
+    read_npy,
+    read_parquet,
+    write_json,
+    write_npy,
+    write_parquet,
+)
+from gigarag.corpus import read_jsonl
+from gigarag.text import is_mostly_latin, visible_text
 
 pd.set_option("display.max_colwidth", 120)
 plt.rcParams["figure.dpi"] = 110
 
-ROOT = Path.cwd()
-DATA = ROOT / "data"
-CACHE = DATA / "cache"
-CACHE.mkdir(exist_ok=True)
+DATA = Path.cwd() / "data"
+rows, CORPUS_SHA = read_jsonl(DATA / "corpus.jsonl")
+cache = CacheStore(DATA / "cache", CORPUS_SHA)
+# Отпечатки кода, от которого зависят результаты: правка регулярок или формул сама меняет ключи кэшей.
+TEXT_CODE = code_fingerprint(gigarag.patterns, gigarag.text)
+NOISE_CODE = code_fingerprint(gigarag.patterns, gigarag.noise)
 
-corpus_bytes = (DATA / "corpus.jsonl").read_bytes()
-CORPUS_SHA = hashlib.sha256(corpus_bytes).hexdigest()
-df = pd.DataFrame([json.loads(l) for l in corpus_bytes.decode("utf-8").splitlines()])
+df = pd.DataFrame(rows)
 assert df["doc_id"].is_unique
 df["date"] = pd.to_datetime(df["date"])
-TAG_RE = re.compile(r"<[^>]+>")
-ENTITY_RE = re.compile(r"&(?:[a-zA-Z][a-zA-Z0-9]*|#\d+|#[xX][0-9a-fA-F]+);")
-
-
-def visible_text(raw: str) -> str:
-    """Видимый текст: теги → пробел, затем декодирование HTML-сущностей (&nbsp;, &quot;, &#8212; …)."""
-    return re.sub(r"\s+", " ", html.unescape(TAG_RE.sub(" ", raw))).strip()
-
-
 df["visible"] = df["text"].map(visible_text)
-print("документов с HTML-сущностями:", df["text"].str.contains(ENTITY_RE).sum())
+print("документов с HTML-сущностями:", df["text"].map(patterns.has_html_entity).sum())
 print(len(df), "документов, sha256 корпуса:", CORPUS_SHA[:16])
-
-
-def cache_path(name: str, ext: str, **params) -> Path:
-    """Путь кэша, привязанный к содержимому корпуса и параметрам расчёта.
-
-    Пересборка корпуса или смена модели/параметров дают новый ключ — старый кэш
-    просто не находится, и результат пересчитывается.
-    """
-    key = hashlib.sha256(json.dumps({"corpus": CORPUS_SHA, **params}, sort_keys=True).encode()).hexdigest()[:16]
-    return CACHE / f"{name}-{key}.{ext}"
 
 # %% [markdown]
 # ## 1. Состав корпуса
 
 # %%
 by_src = df.groupby("source").agg(docs=("doc_id", "size"), first=("date", "min"), last=("date", "max"))
-by_src["share_%"] = (by_src["docs"] / len(df) * 100).round(1)
+by_src["share_%"] = stats.share_percent(by_src["docs"]).round(1)
 by_src
 
 # %%
@@ -100,43 +98,40 @@ from transformers import AutoTokenizer
 TOKENIZER = "BAAI/bge-m3"
 TOKENIZER_REV = "5617a9f61b028005a4858fdac845db406aefb181"  # фиксированный commit на Hugging Face
 tok = AutoTokenizer.from_pretrained(TOKENIZER, revision=TOKENIZER_REV)
-len_cache = cache_path("token_lens", "parquet", tokenizer=TOKENIZER, revision=TOKENIZER_REV, visible="unescape-v1")
-if len_cache.exists():
-    lens = pd.read_parquet(len_cache)
-else:
-    def count(texts):
-        return [len(x) for x in tok(list(texts), add_special_tokens=False)["input_ids"]]
-    lens = pd.DataFrame({"doc_id": df["doc_id"], "tok_raw": count(df["text"]), "tok_visible": count(df["visible"])})
-    lens.to_parquet(len_cache)
+
+
+def token_lengths(texts) -> list[int]:
+    return [len(ids) for ids in tok(list(texts), add_special_tokens=False)["input_ids"]]
+
+
+lens = load_or_compute(
+    cache.path("token_lens", "parquet", tokenizer=TOKENIZER, revision=TOKENIZER_REV, code=TEXT_CODE),
+    lambda: pd.DataFrame({"doc_id": df["doc_id"], "tok_raw": token_lengths(df["text"]),
+                          "tok_visible": token_lengths(df["visible"])}),
+    load=read_parquet, save=write_parquet,
+)
 n_before = len(df)
 df = df.merge(lens, on="doc_id", how="left", validate="one_to_one")
 assert len(df) == n_before and df["tok_raw"].notna().all(), "кэш длин не покрывает корпус"
 print("токенов всего: сырых", df["tok_raw"].sum(), "| видимых", df["tok_visible"].sum())
 
 # %%
-def length_stats(col):
-    g = df.groupby("source")[col]
-    s = g.describe(percentiles=[0.1, 0.5, 0.9])[["count", "mean", "std", "min", "10%", "50%", "90%", "max"]]
-    s["<50_%"] = g.apply(lambda x: (x < 50).mean() * 100)
-    s[">2000_%"] = g.apply(lambda x: (x > 2000).mean() * 100)
-    s.loc["ВСЕГО"] = [*df[col].describe(percentiles=[0.1, 0.5, 0.9])[["count", "mean", "std", "min", "10%", "50%", "90%", "max"]],
-                     (df[col] < 50).mean() * 100, (df[col] > 2000).mean() * 100]
-    return s.round(1)
+SHORT, LONG = 50, 2000  # пороги выбросов из ТЗ, в токенах
 
 print("Видимый текст:")
-display(length_stats("tok_visible"))
+display(stats.length_summary(df, "tok_visible", by="source", short=SHORT, long=LONG))
 print("Сырой текст с разметкой:")
-display(length_stats("tok_raw"))
+display(stats.length_summary(df, "tok_raw", by="source", short=SHORT, long=LONG))
 
 # %%
 fig, axes = plt.subplots(1, 2, figsize=(14, 4.5))
 bins = np.logspace(0, np.log10(df["tok_raw"].max() + 1), 60)
-for ax, col, title in zip(axes, ["tok_visible", "tok_raw"], ["видимый текст", "сырой текст с HTML"]):
+for ax, col, title in zip(axes, ["tok_visible", "tok_raw"], ["видимый текст", "сырой текст с HTML"], strict=True):
     for src, g in df.groupby("source"):
         ax.hist(g[col].clip(lower=1), bins=bins, alpha=0.55, label=src)
     ax.set_xscale("log")
-    ax.axvline(50, color="k", ls="--", lw=1)
-    ax.axvline(2000, color="k", ls="--", lw=1)
+    ax.axvline(SHORT, color="k", ls="--", lw=1)
+    ax.axvline(LONG, color="k", ls="--", lw=1)
     ax.set_title(f"Распределение длин, {title}")
     ax.set_xlabel("токенов BGE-M3 (лог. шкала)")
 axes[0].legend()
@@ -149,6 +144,7 @@ plt.tight_layout()
 cols = ["source", "tok_visible", "visible"]
 display(df[df["tok_visible"] < 5].sample(8, random_state=1)[cols])
 display(df.nlargest(5, "tok_visible")[["source", "tok_visible", "tok_raw", "title"]])
+
 
 # %% [markdown]
 # ## 3. Шум: доля «мусорных» токенов
@@ -165,59 +161,28 @@ display(df.nlargest(5, "tok_visible")[["source", "tok_visible", "tok_raw", "titl
 #   правки («урон увеличен с 75 до 80»), удалять их нельзя.
 
 # %%
-URL_RE = re.compile(r"https?://[^\s\"'<>]+|www\.[^\s\"'<>]+|t\.me/[^\s\"'<>]+")
-CLASSES = ["space", "word", "num", "punct", "special", "emoji", "html", "url"]  # индекс = приоритет
-SPAN_RES = [  # от низкого приоритета к высокому — более поздний перезаписывает
-    (1, re.compile(r"[^\W\d_]+")),
-    (4, re.compile(r"[^\w\s]|_")),
-    (3, re.compile(r"[.,!?:;…\-–—«»\"'()\[\]]")),
-    (2, re.compile(r"\d+")),
-]
-NOISE = ["html", "url", "emoji", "special"]
+def token_offsets(text: str):
+    return tok(text, add_special_tokens=False, return_offsets_mapping=True)["offset_mapping"]
 
 
-def char_classes(text: str) -> np.ndarray:
-    codes = np.zeros(len(text), dtype=np.int8)
-    for code, rx in SPAN_RES:
-        for m in rx.finditer(text):
-            codes[m.start():m.end()] = code
-    for e in emoji.emoji_list(text):
-        codes[e["match_start"]:e["match_end"]] = 5
-    for rx in (TAG_RE, ENTITY_RE):
-        for m in rx.finditer(text):
-            codes[m.start():m.end()] = 6
-    for m in URL_RE.finditer(text):
-        codes[m.start():m.end()] = 7
-    return codes
+def compute_token_classes() -> pd.DataFrame:
+    counts = np.vstack([noise.token_class_counts(t, token_offsets) for t in df["text"]])
+    return pd.DataFrame(counts, columns=noise.CLASS_NAMES).assign(doc_id=df["doc_id"].values)
 
 
-def token_class_counts(text: str) -> np.ndarray:
-    offs = tok(text, add_special_tokens=False, return_offsets_mapping=True)["offset_mapping"]
-    starts = np.array([s for s, e in offs if e > s], dtype=np.int64)
-    if not len(starts):
-        return np.zeros(len(CLASSES), dtype=np.int64)
-    return np.bincount(char_classes(text)[starts], minlength=len(CLASSES))
+token_classes = load_or_compute(
+    cache.path("token_classes", "parquet", tokenizer=TOKENIZER, revision=TOKENIZER_REV, code=NOISE_CODE),
+    compute_token_classes, load=read_parquet, save=write_parquet,
+)
+assert token_classes["doc_id"].tolist() == df["doc_id"].tolist(), "кэш классов не совпадает с корпусом"
+token_classes["source"] = df["source"].values
 
-
-noise_cache = cache_path("token_classes", "parquet", tokenizer=TOKENIZER, revision=TOKENIZER_REV, classes=CLASSES, entity=ENTITY_RE.pattern,
-                         spans=[r.pattern for _, r in SPAN_RES], url=URL_RE.pattern)
-if noise_cache.exists():
-    noise = pd.read_parquet(noise_cache)
-else:
-    noise = pd.DataFrame(np.vstack([token_class_counts(t) for t in df["text"]]), columns=CLASSES)
-    noise.insert(0, "doc_id", df["doc_id"].values)
-    noise.to_parquet(noise_cache)
-assert noise["doc_id"].tolist() == df["doc_id"].tolist(), "кэш классов не совпадает с корпусом"
-noise["source"] = df["source"].values
-
-share = noise.groupby("source")[CLASSES[1:]].sum()
-share.loc["ВСЕГО"] = share.sum()
-share = share.div(share.sum(axis=1), axis=0) * 100
-share["удаляемый_шум_%"] = share[NOISE].sum(axis=1)
+share = noise.class_shares_percent(token_classes, by="source")
+share["удаляемый_шум_%"] = noise.removable_noise_percent(share)
 share.round(1)
 
 # %%
-share[CLASSES[1:]].plot(kind="barh", stacked=True, figsize=(11, 4), colormap="tab20")
+share[noise.CONTENT_CLASSES].plot(kind="barh", stacked=True, figsize=(11, 4), colormap="tab20")
 plt.title("Состав сырого текста по классам, % токенов BGE-M3")
 plt.xlabel("% токенов")
 plt.legend(bbox_to_anchor=(1, 1))
@@ -228,17 +193,15 @@ plt.tight_layout()
 # пересылками, медиа без текста, а также рекламные маркеры в Telegram.
 
 # %%
-# «бонус» сюда не входит: в патчноутах это игровой термин («бонус к урону»)
-ADS_RE = re.compile(r"промокод|ставк|казино|букмекер|фрибет|реклама|erid|бездеп", re.I)
 flags = pd.DataFrame({
     "source": df["source"],
-    "с эмодзи": noise["emoji"].values > 0,
-    "со ссылкой": df["text"].str.contains(URL_RE),
+    "с эмодзи": token_classes["emoji"].values > 0,
+    "со ссылкой": df["text"].map(patterns.has_url),
     "с цитатой": df["meta"].map(lambda m: bool(m.get("has_quote"))),
     "пересылка": df["meta"].map(lambda m: bool(m.get("forwarded_from"))),
     "медиа": df["meta"].map(lambda m: bool(m.get("has_photo") or m.get("has_video"))),
-    "реклама/ставки": df["visible"].str.contains(ADS_RE),
-    "латиница>50%": df["visible"].map(lambda t: sum(ch.isascii() and ch.isalpha() for ch in t) > 0.5 * max(1, sum(ch.isalpha() for ch in t))),
+    "реклама/ставки": df["visible"].map(patterns.has_ads_marker),
+    "латиница>50%": df["visible"].map(is_mostly_latin),
 })
 (flags.groupby("source").mean() * 100).round(1)
 
@@ -254,13 +217,16 @@ flags = pd.DataFrame({
 #   Документы короче 5 слов не участвуют — у них почти нет шинглов.
 
 # %%
-norm = df["visible"].str.lower().str.replace(r"\s+", " ", regex=True).str.strip()
-h = norm.map(lambda t: hashlib.md5(t.encode()).hexdigest())
+norm = df["visible"].map(dedup.normalize_for_dedup)
+h = norm.map(dedup.content_hash)
 dup_groups = h[h.duplicated(keep=False)].groupby(h).size()
 exact = pd.DataFrame({"source": df["source"], "exact_dup": h.duplicated(keep="first")})
-print(f"Точные дубликаты: {exact['exact_dup'].sum()} лишних копий ({exact['exact_dup'].mean()*100:.1f}% корпуса), групп {len(dup_groups)}")
-display(exact.groupby("source")["exact_dup"].agg(["sum", "mean"]).assign(mean=lambda x: (x["mean"] * 100).round(1)).rename(columns={"sum": "копий", "mean": "%"}))
-top = df.loc[h.isin(dup_groups.nlargest(6).index)].groupby(h)["visible"].agg(["size", "first"]).sort_values("size", ascending=False)
+print(f"Точные дубликаты: {exact['exact_dup'].sum()} лишних копий ({exact['exact_dup'].mean()*100:.1f}% корпуса), "
+      f"групп {len(dup_groups)}")
+display(exact.groupby("source")["exact_dup"].agg(["sum", "mean"])
+        .assign(mean=lambda x: (x["mean"] * 100).round(1)).rename(columns={"sum": "копий", "mean": "%"}))
+top = (df.loc[h.isin(dup_groups.nlargest(6).index)].groupby(h)["visible"].agg(["size", "first"])
+       .sort_values("size", ascending=False))
 top
 
 # %%
@@ -268,54 +234,45 @@ JACCARD = 0.8              # итоговый порог почти-дублик
 CAND_THRESHOLDS = [0.4, 0.5, 0.6, 0.7, 0.8]
 CAND_THRESHOLD = 0.5       # порог LSH для кандидатов — заметно ниже итогового, чтобы не терять пары
 NUM_PERM = 128
-words = norm.str.findall(r"\w+")
-shingles = {d: {" ".join(w[j:j + 3]) for j in range(len(w) - 2)} for d, w in zip(df["doc_id"], words) if len(w) >= 5}
-mh_cache = cache_path("near_dup_candidates", "json", shingle=3, min_words=5, num_perm=NUM_PERM, seed=1,
-                      thresholds=CAND_THRESHOLDS, visible="unescape-v1")
-if mh_cache.exists():
-    lsh_runs = json.loads(mh_cache.read_text())
-else:
-    mhs = {}
-    for d, sh in shingles.items():
-        m = MinHash(num_perm=NUM_PERM, seed=1)
-        m.update_batch([x.encode() for x in sh])
-        mhs[d] = m
-    lsh_runs = {}
-    for t in CAND_THRESHOLDS:
-        lsh = MinHashLSH(threshold=t, num_perm=NUM_PERM)
-        for d, m in mhs.items():
-            lsh.insert(d, m)
-        cand_t = sorted({tuple(sorted((d, o))) for d, m in mhs.items() for o in lsh.query(m) if o != d})
-        lsh_runs[str(t)] = {"b": lsh.b, "r": lsh.r, "pairs": cand_t}
-    mh_cache.write_text(json.dumps(lsh_runs, ensure_ascii=False))
+shingles = dedup.shingle_sets(dict(zip(df["doc_id"], norm, strict=True)), n=3, min_words=5)
 
-jac_cache = {}
-def jac(a, b):
-    if (a, b) not in jac_cache:
-        jac_cache[(a, b)] = len(shingles[a] & shingles[b]) / len(shingles[a] | shingles[b])
-    return jac_cache[(a, b)]
 
-hash_by_id = dict(zip(df["doc_id"], h))
-not_exact = lambda a, b: hash_by_id[a] != hash_by_id[b]  # точные дубликаты посчитаны выше
+def compute_lsh_runs() -> dict:
+    signatures = dedup.minhash_signatures(shingles, NUM_PERM)
+    runs = (dedup.lsh_candidates(signatures, t, NUM_PERM) for t in CAND_THRESHOLDS)
+    return {str(r.threshold): {"bands": r.bands, "rows": r.rows, "pairs": r.pairs} for r in runs}
+
+
+lsh_runs = load_or_compute(
+    cache.path("near_dup_candidates", "json", shingle=3, min_words=5, num_perm=NUM_PERM, seed=1,
+               thresholds=CAND_THRESHOLDS, code=TEXT_CODE),
+    compute_lsh_runs, load=read_json, save=write_json,
+)
+hash_by_id = dict(zip(df["doc_id"], h, strict=True))
+
+
+def non_exact(pairs) -> list[tuple[str, str]]:
+    """Пары, которые не являются точными дубликатами (те посчитаны выше)."""
+    return [(a, b) for a, b in pairs if hash_by_id[a] != hash_by_id[b]]
+
 
 # Чувствительность к порогу LSH: сколько пар с точным Jaccard ≥ 0.8 находится при каждом пороге кандидатов
-# и какова теоретическая вероятность, что пара ровно с J = 0.8 станет кандидатом: 1 − (1 − J^r)^b.
-sens = []
-for t in CAND_THRESHOLDS:
-    run = lsh_runs[str(t)]
-    c = [(a, b) for a, b in run["pairs"] if not_exact(a, b)]
-    ok = [(a, b) for a, b in c if jac(a, b) >= JACCARD]
-    sens.append({"порог LSH": t, "bands b": run["b"], "rows r": run["r"],
-                 "P(кандидат | J=0.8)": round(1 - (1 - JACCARD ** run["r"]) ** run["b"], 4),
-                 "кандидатов": len(c), "подтверждено J≥0.8": len(ok)})
-display(pd.DataFrame(sens))
+# и какова теоретическая вероятность, что пара ровно с J = 0.8 станет кандидатом.
+display(pd.DataFrame([
+    {"порог LSH": t, "bands b": run["bands"], "rows r": run["rows"],
+     "P(кандидат | J=0.8)": round(dedup.lsh_candidate_probability(JACCARD, run["bands"], run["rows"]), 4),
+     "кандидатов": len(non_exact(run["pairs"])),
+     "подтверждено J≥0.8": len(dedup.confirmed_pairs(non_exact(run["pairs"]), shingles, JACCARD))}
+    for t, run in ((t, lsh_runs[str(t)]) for t in CAND_THRESHOLDS)
+]))
 
-cand = [(a, b, jac(a, b)) for a, b in lsh_runs[str(CAND_THRESHOLD)]["pairs"] if not_exact(a, b)]
-pairs = [(a, b, j) for a, b, j in cand if j >= JACCARD]
+cand = non_exact(lsh_runs[str(CAND_THRESHOLD)]["pairs"])
+pairs = dedup.confirmed_pairs(cand, shingles, JACCARD)
 near_ids = {d for a, b, _ in pairs for d in (a, b)}
-print(f"Порог кандидатов {CAND_THRESHOLD}: {len(cand)} кандидатов (не точных), подтверждено точным Jaccard ≥ {JACCARD}: "
-      f"{len(pairs)} пар, затронуто документов: {len(near_ids)} ({len(near_ids)/len(df)*100:.1f}%)")
-src = dict(zip(df["doc_id"], df["source"]))
+print(f"Порог кандидатов {CAND_THRESHOLD}: {len(cand)} кандидатов (не точных), "
+      f"подтверждено точным Jaccard ≥ {JACCARD}: {len(pairs)} пар, "
+      f"затронуто документов: {len(near_ids)} ({len(near_ids) / len(df) * 100:.1f}%)")
+src = dict(zip(df["doc_id"], df["source"], strict=True))
 pair_src = Counter(" ↔ ".join(sorted({src[a], src[b]})) if src[a] != src[b] else src[a] for a, b, _ in pairs)
 pd.Series(pair_src, name="пар").sort_values(ascending=False).to_frame()
 
@@ -326,7 +283,7 @@ pd.Series(pair_src, name="пар").sort_values(ascending=False).to_frame()
 # порога LSH — дальнейшее снижение добавляет только кандидатов ниже 0.8, но не новые настоящие пары.
 
 # %%
-vis = dict(zip(df["doc_id"], df["visible"]))
+vis = dict(zip(df["doc_id"], df["visible"], strict=True))
 rng = np.random.default_rng(0)
 for a, b, j in [pairs[i] for i in rng.choice(len(pairs), size=min(4, len(pairs)), replace=False)]:
     print(f"Jaccard {j:.2f}\n[{src[a]}] {vis[a][:200]}\n[{src[b]}] {vis[b][:200]}\n" + "-" * 80)
@@ -340,50 +297,33 @@ for a, b, j in [pairs[i] for i in rng.choice(len(pairs), size=min(4, len(pairs))
 # Это разведочный анализ: цель — увидеть, из каких тем состоит корпус, а не выбрать модель.
 
 # %%
-from sentence_transformers import SentenceTransformer
-from sklearn.cluster import KMeans
-from scipy.sparse import csr_matrix
 from sklearn.feature_extraction.text import CountVectorizer
 
-import torch
+from gigarag import stopwords
+from gigarag.clustering import deterministic_kmeans
+from gigarag.embeddings import encode_passages
+from gigarag.sources.topic_lexicon import CHANNEL_BOILERPLATE
 
 EMB_MODEL = "intfloat/multilingual-e5-small"
 EMB_REV = "614241f622f53c4eeff9890bdc4f31cfecc418b3"  # фиксированный commit на Hugging Face
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"  # на CPU тот же результат, но заметно дольше
-emb_cache = cache_path("emb", "npy", model=EMB_MODEL, revision=EMB_REV, max_seq_length=512, prefix="passage: ", visible="unescape-v1")
-if emb_cache.exists():
-    emb = np.load(emb_cache)
-else:
-    model = SentenceTransformer(EMB_MODEL, revision=EMB_REV, device=DEVICE)
-    model.max_seq_length = 512
-    emb = model.encode(["passage: " + t for t in df["visible"]], batch_size=128, normalize_embeddings=True, show_progress_bar=False)
-    np.save(emb_cache, emb)
+emb = load_or_compute(
+    cache.path("emb", "npy", model=EMB_MODEL, revision=EMB_REV, max_seq_length=512, prefix="passage: ", code=TEXT_CODE),
+    lambda: encode_passages(df["visible"].tolist(), EMB_MODEL, EMB_REV, max_seq_length=512, prefix="passage: "),
+    load=read_npy, save=write_npy,
+)
 assert emb.shape[0] == len(df), "кэш эмбеддингов не совпадает с корпусом"
 
 K = 14
-df["cluster"] = KMeans(n_clusters=K, n_init=10, random_state=42).fit_predict(emb)
-STOP = set("""и в во не что он на я с со как а то все она так его но да ты к у же вы за бы по только ее мне было вот от меня
-еще нет о из ему теперь когда даже ну вдруг ли если уже или ни быть был него до вас нибудь опять уж вам ведь там потом себя
-ничего ей может они тут где есть надо ней для мы тебя их чем была сам чтобы без будто чего раз тоже себе под будет ж тогда кто
-этот того потому этого какой совсем ним здесь этом один почти мой тем чтобы нее сейчас были куда зачем всех никогда можно при
-наконец два об другой хоть после над больше тот через эти нас про всего них какая много разве три эту моя впрочем хорошо свою
-этой перед иногда лучше чуть том нельзя такой им более всегда конечно всю между это the of to and in is for on""".split())
-# c-TF-IDF (как в BERTopic): частота термина в кластере × log(1 + A / частота термина во всём корпусе),
-# A — среднее число слов в кластере. Редкие опечатки отсекаются по документам (min_df=3 документа),
-# а не по кластерам — так термины, характерные только для одного кластера, сохраняются.
-# Слова из подписей каналов и названия игры встречаются почти в каждом посте и забивают верх
-# любого кластера Telegram — для названий тем они бесполезны (как шаблонный текст они разобраны выше).
-BOILERPLATE = {"gabe", "news", "dota", "доты", "доте", "доту", "дота"}
-vec = CountVectorizer(lowercase=True, min_df=3, token_pattern=r"(?u)\b[^\W\d_]{3,}\b", stop_words=sorted(STOP | BOILERPLATE))
-counts = vec.fit_transform(df["visible"])
-onehot = csr_matrix((np.ones(len(df)), (df["cluster"].values, np.arange(len(df)))), shape=(K, len(df)))
-tf_cl = (onehot @ counts).toarray().astype(float)
-words_per_cl = tf_cl.sum(axis=1, keepdims=True)
-ctfidf = (tf_cl / words_per_cl) * np.log1p(words_per_cl.mean() / tf_cl.sum(axis=0, keepdims=True))
-terms = np.array(vec.get_feature_names_out())
+df["cluster"] = deterministic_kmeans(emb, n_clusters=K, seed=42)
+
+# Подписи каналов исключены: они есть почти в каждом посте и забивают верх любого кластера Telegram.
+# Редкие опечатки отсекаются по документам (min_df=3), а не по кластерам — специфичные термины сохраняются.
+vec = CountVectorizer(lowercase=True, min_df=3, tokenizer=patterns.topic_words, token_pattern=None,
+                      stop_words=sorted(stopwords.RUSSIAN | stopwords.ENGLISH | CHANNEL_BOILERPLATE))
+weights = topics.class_tfidf(topics.cluster_term_counts(vec.fit_transform(df["visible"]), df["cluster"].values, K))
 clusters = pd.DataFrame({
     "docs": df.groupby("cluster").size(),
-    "top_terms": [", ".join(terms[np.argsort(-ctfidf[i])[:10]]) for i in range(K)],
+    "top_terms": [", ".join(t) for t in topics.top_terms(weights, vec.get_feature_names_out())],
 })
 clusters = clusters.join((pd.crosstab(df["cluster"], df["source"], normalize="index") * 100).round(0))
 clusters.sort_values("docs", ascending=False)
@@ -423,8 +363,8 @@ summary = {
     "токенов видимого текста (BGE-M3)": int(df["tok_visible"].sum()),
     "токенов сырого текста": int(df["tok_raw"].sum()),
     "медиана длины, видимый": int(df["tok_visible"].median()),
-    "доля < 50 токенов, %": round((df["tok_visible"] < 50).mean() * 100, 1),
-    "доля > 2000 токенов, %": round((df["tok_visible"] > 2000).mean() * 100, 1),
+    f"доля < {SHORT} токенов, %": round(stats.percent_where(df["tok_visible"], lambda v: v < SHORT), 1),
+    f"доля > {LONG} токенов, %": round(stats.percent_where(df["tok_visible"], lambda v: v > LONG), 1),
     "удаляемого шума в сыром тексте, % токенов": round(share.loc["ВСЕГО", "удаляемый_шум_%"], 1),
     "чисел, % токенов": round(share.loc["ВСЕГО", "num"], 1),
     "точных дубликатов, %": round(exact["exact_dup"].mean() * 100, 1),
@@ -462,7 +402,8 @@ pd.Series(summary).to_frame("значение")
 #   настолько частые, что без отдельного стоп-списка они занимают верх ключевых слов любого кластера Telegram;
 #   рубрики-шаблоны («Еженедельный мета-отчёт»); удалённые и пустые комментарии (только картинка или цитата).
 # * Скрытая реклама: регулярка по букмекерским словам находит лишь ~1% постов, но кластеризация выделила
-#   отдельный кластер (~1,8 тыс. постов @gabenews) розыгрышей и промо бота-предиктора. Это тоже кандидат на фильтрацию в КТ 2.
+#   отдельный кластер (~1,8 тыс. постов @gabenews) розыгрышей и промо бота-предиктора.
+#   Это тоже кандидат на фильтрацию в КТ 2.
 # * Дубликаты: 2,2% лишних точных копий (больше всего — шаблонные посты @Dota2 и «Данный комментарий был удалён»).
 #   Ещё 1,7% документов (191 пара) — почти-дубликаты с подтверждённым Jaccard ≥ 0,8: в основном отредактированные
 #   и перепощенные посты одного канала. Число пар выходит на плато уже при пороге кандидатов LSH 0,6

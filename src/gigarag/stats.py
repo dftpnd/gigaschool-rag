@@ -1,0 +1,28 @@
+"""Описательная статистика по группам."""
+
+import pandas as pd
+
+_DESCRIBE_COLS = ["count", "mean", "std", "min", "10%", "50%", "90%", "max"]
+_PERCENTILES = [0.1, 0.5, 0.9]
+
+
+def percent_where(values: pd.Series, condition) -> float:
+    """Процент элементов, для которых выполняется `condition` (функция Series → bool Series)."""
+    return float(condition(values).mean() * 100)
+
+
+def length_summary(df: pd.DataFrame, column: str, by: str, short: int, long: int) -> pd.DataFrame:
+    """Распределение длин по группам и в целом: перцентили и доли коротких (< short) и длинных (> long)."""
+    def summarize(values: pd.Series) -> pd.Series:
+        stats = values.describe(percentiles=_PERCENTILES)[_DESCRIBE_COLS]
+        stats[f"<{short}_%"] = percent_where(values, lambda v: v < short)
+        stats[f">{long}_%"] = percent_where(values, lambda v: v > long)
+        return stats
+
+    groups = {name: summarize(values) for name, values in df.groupby(by)[column]}
+    groups["ВСЕГО"] = summarize(df[column])
+    return pd.DataFrame(groups).T.rename_axis(by).round(1)
+
+
+def share_percent(counts: pd.Series) -> pd.Series:
+    return counts / counts.sum() * 100

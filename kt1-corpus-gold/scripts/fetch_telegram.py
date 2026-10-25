@@ -8,42 +8,60 @@
 """
 
 import argparse
-import re
+from pathlib import Path
 
-from common import RAW, Fetcher
+from gigarag.dates import iso_date
+from gigarag.http import PoliteFetcher
+from gigarag.patterns import datetime_attrs, telegram_post_ids
+from settings import RAW_TELEGRAM
+
+PROGRESS_EVERY = 20  # печатать прогресс раз в столько страниц
 
 
-def fetch_channel(f: Fetcher, channel: str, since: str):
-    out = RAW / "telegram" / channel
-    out.mkdir(parents=True, exist_ok=True)
-    done = sorted(int(p.stem) for p in out.glob("*.html"))
-    before = done[0] if done else None
-    pages = 0
+def oldest_downloaded(channel_dir: Path) -> int | None:
+    ids = [int(p.stem) for p in channel_dir.glob("*.html")]
+    return min(ids) if ids else None
+
+
+def oldest_date(html: str) -> str:
+    dates = datetime_attrs(html)
+    return iso_date(min(dates)) if dates else ""
+
+
+def reached_end(min_post_id: int, oldest: str, since: str) -> bool:
+    """Лента кончилась (первый пост канала) или ушла старше границы `since`."""
+    return min_post_id <= 1 or bool(oldest and oldest < since)
+
+
+def fetch_channel(fetcher: PoliteFetcher, channel: str, since: str) -> int:
+    channel_dir = RAW_TELEGRAM / channel
+    channel_dir.mkdir(parents=True, exist_ok=True)
+    before, pages = oldest_downloaded(channel_dir), 0
     while True:
-        html = f.get(f"https://t.me/s/{channel}", **({"before": before} if before else {})).text
-        ids = [int(i) for i in re.findall(rf'data-post="{channel}/(\d+)"', html, re.I)]
+        html = fetcher.get(f"https://t.me/s/{channel}", **({"before": before} if before else {})).text
+        ids = telegram_post_ids(html, channel)
         if not ids:
             break
-        (out / f"{min(ids)}.html").write_text(html, encoding="utf-8")
+        first, oldest = min(ids), oldest_date(html)
+        (channel_dir / f"{first}.html").write_text(html, encoding="utf-8")
         pages += 1
-        dates = re.findall(r'<time datetime="([^"]+)"', html)
-        oldest = min(dates) if dates else ""
-        if pages % 20 == 0:
-            print(f"{channel}: {pages} стр., пост {min(ids)}, {oldest[:10]}", flush=True)
-        if min(ids) <= 1 or (oldest and oldest[:10] < since):
+        if pages % PROGRESS_EVERY == 0:
+            print(f"{channel}: {pages} стр., пост {first}, {oldest}", flush=True)
+        if reached_end(first, oldest, since):
             break
-        before = min(ids)
+        before = first
     print(f"{channel}: готово, {pages} новых стр.", flush=True)
+    return pages
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("channels", nargs="+")
     ap.add_argument("--since", default="2018-01-01", help="не листать старше этой даты (YYYY-MM-DD)")
     args = ap.parse_args()
-    f = Fetcher(delay=1.5)
-    for ch in args.channels:
-        fetch_channel(f, ch, args.since)
+    fetcher = PoliteFetcher(min_interval=1.5)
+    for channel in args.channels:
+        fetch_channel(fetcher, channel, args.since)
 
 
 if __name__ == "__main__":
