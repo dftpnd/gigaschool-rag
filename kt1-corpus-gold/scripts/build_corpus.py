@@ -8,6 +8,7 @@
 в доле OFFTOPIC_SHARE от тематических — как реалистичный шум.
 """
 
+import hashlib
 import json
 import random
 import re
@@ -163,7 +164,9 @@ def dota2ru_docs(patch_dates):
                 if not msg:
                     continue
                 rep = c.css_first("[data-reply-answer]")
-                cid = rep.attributes["data-reply-answer"] if rep else str(abs(hash(msg.html)))
+                # без id на странице — стабильный digest, а не hash(): тот рандомизирован между запусками
+                cid = rep.attributes["data-reply-answer"] if rep else \
+                    "h" + hashlib.blake2b(f"{aid}\n{msg.html}".encode(), digest_size=8).hexdigest()
                 ctime = c.css_first("[data-time]")
                 author = c.css_first(".global-content__comment-name")
                 yield {
@@ -179,8 +182,14 @@ def dota2ru_docs(patch_dates):
 # ---------- Telegram ----------
 
 def tg_posts(channel):
+    """Посты канала, отсортированные по doc_id.
+
+    Соседние страницы ленты пересекаются; при повторе берётся версия поста со страницы
+    с меньшим номером — порядок обхода фиксирован, поэтому результат не зависит от ФС.
+    """
     seen = {}
-    for f in (RAW / "telegram" / channel).glob("*.html"):
+    pages = sorted((RAW / "telegram" / channel).glob("*.html"), key=lambda p: int(p.stem))
+    for f in pages:
         t = LexborHTMLParser(f.read_text(encoding="utf-8"))
         for m in t.css(".tgme_widget_message[data-post]"):
             pid = m.attributes["data-post"]
@@ -202,26 +211,28 @@ def tg_posts(channel):
                     "views": views.text(strip=True) if views else None,
                 },
             }
-    return list(seen.values())
+    return sorted(seen.values(), key=lambda p: p["doc_id"])
 
 
-def tg_docs(since_date, topic_re, rng):
+def tg_docs(since_date, topic_re):
     for ch in sorted(p.name for p in (RAW / "telegram").iterdir()):
         posts = [p for p in tg_posts(ch) if p["date"] and p["date"] >= since_date and p["text"]]
         plain = lambda p: re.sub(r"<[^>]+>", " ", p["text"]).lower()
         topical = [p for p in posts if topic_re.search(plain(p))]
         rest = [p for p in posts if not topic_re.search(plain(p))]
+        # свой генератор на канал и популяция в фиксированном порядке (по doc_id) —
+        # выборка офтопа зависит только от seed и набора постов
+        rng = random.Random(f"{SEED}:{ch}")
         off = rng.sample(rest, min(len(rest), int(len(topical) * OFFTOPIC_SHARE)))
         for p in topical:
             p["meta"]["topical"] = True
         for p in off:
             p["meta"]["topical"] = False
         print(f"  {ch}: постов в окне {len(posts)}, тематических {len(topical)}, офтоп {len(off)}")
-        yield from sorted(topical + off, key=lambda p: p["date"])
+        yield from sorted(topical + off, key=lambda p: (p["date"], p["doc_id"]))
 
 
 def main():
-    rng = random.Random(SEED)
     plist = json.loads((RAW / "patches" / "_patchnoteslist.json").read_text())
     patch_dates = {p["patch_number"]: ts_date(p["patch_timestamp"]) for p in plist}
     since_date = patch_dates[SINCE_PATCH]
@@ -231,19 +242,23 @@ def main():
     names += [a["name_loc"] for a in json.loads((d / "_itemlist.json").read_text())["result"]["data"]["itemabilities"]
               if a["name_loc"] and not a["name_loc"].startswith("Recipe") and len(a["name_loc"]) > 3]
     topic_re = re.compile(
-        "|".join(TERMS + [rf"\b{re.escape(w)}\b" for w in RU_HEROES] + [rf"\b{re.escape(n.lower())}\b" for n in set(names)]),
+        "|".join(TERMS + [rf"\b{re.escape(w)}\b" for w in RU_HEROES] + [rf"\b{re.escape(n.lower())}\b" for n in sorted(set(names))]),
         re.I,
     )
 
-    counts = {}
+    docs = [doc for gen in (patch_docs(), dota2ru_docs(patch_dates), tg_docs(since_date, topic_re)) for doc in gen]
+    # doc_id — ключ для gold-набора и кэшей, поэтому дубли недопустимы
+    dup = [k for k, v in Counter(d["doc_id"] for d in docs).items() if v > 1]
+    if dup:
+        raise SystemExit(f"неуникальные doc_id ({len(dup)}): {dup[:5]}")
     with OUT.open("w", encoding="utf-8") as out:
-        for gen in (patch_docs(), dota2ru_docs(patch_dates), tg_docs(since_date, topic_re, rng)):
-            for doc in gen:
-                out.write(json.dumps(doc, ensure_ascii=False) + "\n")
-                counts[doc["source"]] = counts.get(doc["source"], 0) + 1
-    for k, v in counts.items():
+        for doc in docs:
+            out.write(json.dumps(doc, ensure_ascii=False) + "\n")
+    digest = hashlib.sha256(OUT.read_bytes()).hexdigest()
+    for k, v in Counter(d["source"] for d in docs).items():
         print(f"{k:18} {v}")
-    print("всего:", sum(counts.values()), "→", OUT)
+    print("всего:", len(docs), "→", OUT)
+    print("sha256:", digest)
 
 
 if __name__ == "__main__":

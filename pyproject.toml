@@ -22,9 +22,11 @@ dependencies = [
     "transformers>=5.20.2",
 ]
 
-
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
+# Linux — сборка с CUDA 12.8 (RTX 50xx); macOS и прочие — обычные колёса PyPI (CPU/MPS)
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+]
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
