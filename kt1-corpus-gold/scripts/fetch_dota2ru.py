@@ -2,14 +2,18 @@
 
 HTML страниц сохраняется целиком, с навигацией, рекламой и скриптами — чистка
 будет в КТ 2. Комментарии у статьи бывают на нескольких страницах (?page=N).
-Повторный запуск пропускает уже скачанные статьи.
+Повторный запуск докачивает только недостающее: отсутствующие статьи и отсутствующие
+страницы комментариев у уже скачанных (пагинация читается из сохранённой первой страницы).
+Каждый файл пишется атомарно, поэтому прерванная загрузка не оставляет обрезанных файлов.
 """
 
 from collections.abc import Iterator
+from pathlib import Path
 
+from gigarag.atomic import atomic_write_text
 from gigarag.http import PoliteFetcher
-from gigarag.patterns import news_links, page_numbers
-from gigarag.sources.dota2ru import BASE_URL, EXTRA_PAGE_MARK
+from gigarag.patterns import news_links
+from gigarag.sources.dota2ru import BASE_URL, EXTRA_PAGE_MARK, pending_comment_pages
 from settings import RAW_DOTA2RU
 
 LISTING = f"{BASE_URL}/news/patches/"
@@ -34,16 +38,32 @@ def all_article_links(fetcher: PoliteFetcher) -> list[str]:
     return list(seen)
 
 
-def download_article(fetcher: PoliteFetcher, link: str) -> int:
-    """Первая страница статьи и дополнительные страницы комментариев; возвращает число доп. страниц."""
-    slug = link.rsplit("/", 1)[-1]
-    html = fetcher.get(BASE_URL + link).text
-    (RAW_DOTA2RU / f"{slug}.html").write_text(html, encoding="utf-8")
-    extra = sorted(page_numbers(html, link) - {1})
-    for n in extra:
-        page_html = fetcher.get(BASE_URL + link, page=n).text
-        (RAW_DOTA2RU / f"{slug}{EXTRA_PAGE_MARK}{n}.html").write_text(page_html, encoding="utf-8")
-    return len(extra)
+def article_slug(link: str) -> str:
+    return link.rsplit("/", 1)[-1]
+
+
+def first_page_path(link: str) -> Path:
+    return RAW_DOTA2RU / f"{article_slug(link)}.html"
+
+
+def extra_page_path(link: str, n: int) -> Path:
+    return RAW_DOTA2RU / f"{article_slug(link)}{EXTRA_PAGE_MARK}{n}.html"
+
+
+def complete_article(fetcher: PoliteFetcher, link: str) -> int:
+    """Докачивает первую страницу (если её нет) и недостающие страницы комментариев; возвращает число скачанных."""
+    first = first_page_path(link)
+    downloaded = 0
+    if not first.exists():
+        atomic_write_text(first, fetcher.get(BASE_URL + link).text)
+        downloaded += 1
+    def downloaded_page(n: int) -> bool:
+        return extra_page_path(link, n).exists()
+
+    for n in pending_comment_pages(first.read_text(encoding="utf-8"), link, downloaded_page):
+        atomic_write_text(extra_page_path(link, n), fetcher.get(BASE_URL + link, page=n).text)
+        downloaded += 1
+    return downloaded
 
 
 def main() -> None:
@@ -52,11 +72,8 @@ def main() -> None:
     links = all_article_links(fetcher)
     print("статей:", len(links), flush=True)
     for link in links:
-        slug = link.rsplit("/", 1)[-1]
-        if (RAW_DOTA2RU / f"{slug}.html").exists():
-            continue
-        extra = download_article(fetcher, link)
-        print(slug[:70], f"+{extra} стр." if extra else "", flush=True)
+        if downloaded := complete_article(fetcher, link):
+            print(article_slug(link)[:70], f"скачано стр.: {downloaded}", flush=True)
 
 
 if __name__ == "__main__":

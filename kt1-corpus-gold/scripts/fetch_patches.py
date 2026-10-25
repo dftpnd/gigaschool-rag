@@ -8,6 +8,7 @@
 import json
 from pathlib import Path
 
+from gigarag.atomic import atomic_write_text
 from gigarag.http import PoliteFetcher
 from settings import RAW_PATCHES
 
@@ -17,7 +18,7 @@ REFERENCE_LISTS = ("herolist", "itemlist", "abilitylist")
 
 
 def save_json(path: Path, data, indent: int | None = None) -> None:
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=indent), encoding="utf-8")
+    atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=indent))
 
 
 def main() -> None:

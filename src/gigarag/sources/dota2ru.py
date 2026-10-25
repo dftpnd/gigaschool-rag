@@ -5,7 +5,7 @@
 """
 
 import hashlib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,7 +13,7 @@ from selectolax.lexbor import LexborHTMLParser, LexborNode
 
 from gigarag.corpus import Document
 from gigarag.dates import iso_date, unix_to_iso_date
-from gigarag.patterns import patch_from_slug
+from gigarag.patterns import page_numbers, patch_from_slug
 from gigarag.sources import patch_at_least
 
 BASE_URL = "https://dota2.ru"
@@ -95,6 +95,12 @@ def is_extra_page(path: Path) -> bool:
 
 def extra_page_number(path: Path) -> int:
     return int(path.stem.rsplit("p", 1)[1])
+
+
+def pending_comment_pages(first_html: str, link: str, downloaded: Callable[[int], bool]) -> list[int]:
+    """Номера дополнительных страниц комментариев, на которые ссылается первая страница статьи,
+    но которые ещё не скачаны (`downloaded(n)` — есть ли страница n)."""
+    return [n for n in sorted(page_numbers(first_html, link) - {1}) if not downloaded(n)]
 
 
 def comment_pages(raw_dir: Path, first: Path) -> list[Path]:

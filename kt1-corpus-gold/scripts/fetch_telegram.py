@@ -10,6 +10,7 @@
 import argparse
 from pathlib import Path
 
+from gigarag.atomic import atomic_write_text
 from gigarag.dates import iso_date
 from gigarag.http import PoliteFetcher
 from gigarag.patterns import datetime_attrs, telegram_post_ids
@@ -43,7 +44,7 @@ def fetch_channel(fetcher: PoliteFetcher, channel: str, since: str) -> int:
         if not ids:
             break
         first, oldest = min(ids), oldest_date(html)
-        (channel_dir / f"{first}.html").write_text(html, encoding="utf-8")
+        atomic_write_text(channel_dir / f"{first}.html", html)
         pages += 1
         if pages % PROGRESS_EVERY == 0:
             print(f"{channel}: {pages} стр., пост {first}, {oldest}", flush=True)

@@ -1,6 +1,7 @@
-"""Вежливый HTTP-клиент: пауза между запросами и повторы с экспоненциальной задержкой."""
+"""Вежливый HTTP-клиент: пауза между запросами и повторы временных сбоев с экспоненциальной задержкой."""
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import httpx
@@ -23,34 +24,49 @@ DEFAULT_RETRY = RetryPolicy()
 
 
 def is_retryable(status_code: int) -> bool:
+    """Временный сбой сервера: 429 и 5xx. Остальные 4xx повторять бессмысленно."""
     return status_code == 429 or status_code >= 500
+
+
+def send_with_retries(send: Callable[[], httpx.Response], retry: RetryPolicy,
+                      sleep: Callable[[float], None] = time.sleep,
+                      log: Callable[[str], None] = print) -> httpx.Response:
+    """Выполняет `send()`, повторяя только сетевые ошибки и временные статусы (`is_retryable`).
+    Постоянные ошибки (404, 401, …) пробрасываются сразу как `HTTPStatusError`."""
+    for attempt in range(retry.attempts):
+        last = attempt == retry.attempts - 1
+        try:
+            response = send()
+        except httpx.TransportError as e:
+            if last:
+                raise
+            reason = repr(e)
+        else:
+            if not is_retryable(response.status_code) or last:
+                return response.raise_for_status()
+            reason = f"HTTP {response.status_code}"
+        pause = retry.backoff(attempt)
+        log(f"  {reason}, повтор через {pause:.0f} с")
+        sleep(pause)
+    raise AssertionError("unreachable")
 
 
 class PoliteFetcher:
     """GET-запросы не чаще одного в `min_interval` секунд; временные сбои повторяются."""
 
-    def __init__(self, min_interval: float = 1.0, retry: RetryPolicy = DEFAULT_RETRY, timeout: float = 30):
-        self._client = httpx.Client(headers={"User-Agent": USER_AGENT}, follow_redirects=True, timeout=timeout)
+    def __init__(self, min_interval: float = 1.0, retry: RetryPolicy = DEFAULT_RETRY, timeout: float = 30,
+                 client: httpx.Client | None = None):
+        self._client = client or httpx.Client(headers={"User-Agent": USER_AGENT}, follow_redirects=True,
+                                              timeout=timeout)
         self._min_interval = min_interval
         self._retry = retry
         self._last_request = 0.0
 
     def get(self, url: str, **params) -> httpx.Response:
-        for attempt in range(self._retry.attempts):
+        def send() -> httpx.Response:
             self._wait_turn()
-            try:
-                response = self._client.get(url, params=params or None)
-                if is_retryable(response.status_code):
-                    raise httpx.HTTPStatusError(str(response.status_code), request=response.request, response=response)
-                response.raise_for_status()
-                return response
-            except (httpx.TransportError, httpx.HTTPStatusError) as e:
-                if attempt == self._retry.attempts - 1:
-                    raise
-                pause = self._retry.backoff(attempt)
-                print(f"  {url}: {e}, повтор через {pause:.0f} с", flush=True)
-                time.sleep(pause)
-        raise AssertionError("unreachable")
+            return self._client.get(url, params=params or None)
+        return send_with_retries(send, self._retry, log=lambda m: print(f"  {url}:{m}", flush=True))
 
     def _wait_turn(self) -> None:
         wait = self._min_interval - (time.monotonic() - self._last_request)

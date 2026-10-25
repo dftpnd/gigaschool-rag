@@ -7,6 +7,8 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
+from gigarag.atomic import atomic_write_bytes
+
 
 @dataclass(frozen=True)
 class Document:
@@ -45,9 +47,9 @@ def ensure_unique_ids(docs: list[Document]) -> list[Document]:
 
 
 def write_jsonl(docs: Iterable[Document], path: Path) -> str:
-    """Пишет корпус построчно и возвращает sha256 файла."""
+    """Пишет корпус построчно (атомарно) и возвращает sha256 файла."""
     payload = "".join(d.to_json() + "\n" for d in docs).encode("utf-8")
-    path.write_bytes(payload)
+    atomic_write_bytes(path, payload)
     return sha256_hex(payload)
 
 

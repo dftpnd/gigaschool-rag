@@ -11,6 +11,8 @@ from types import ModuleType
 import numpy as np
 import pandas as pd
 
+from gigarag.atomic import atomic_save
+
 
 def cache_key(fingerprint: str, params: dict) -> str:
     """Короткий ключ от отпечатка данных и параметров: меняется что угодно — меняется ключ."""
@@ -41,11 +43,12 @@ class CacheStore:
 
 def load_or_compute[T](path: Path, compute: Callable[[], T], *,
                     load: Callable[[Path], T], save: Callable[[T, Path], None]) -> T:
-    """Значение из кэша, а если его нет — вычислить и сохранить."""
+    """Значение из кэша, а если его нет — вычислить и сохранить атомарно
+    (прерванная запись не оставит повреждённого файла, который потом загрузится как кэш)."""
     if path.exists():
         return load(path)
     value = compute()
-    save(value, path)
+    atomic_save(save, value, path)
     return value
 
 
