@@ -6,9 +6,18 @@ import numpy as np
 from gigarag import patterns
 from gigarag.gold import Evidence, GoldItem, holdout_size, load_gold, save_gold, stratified_split
 from gigarag.llm import CachedChat, ChatResponse, chat_request, read_env_file
-from gigarag.passages import document_passages, pack, sections, split_article
+from gigarag.passages import (
+    Passage,
+    document_passages,
+    html_blocks,
+    pack,
+    passages_fingerprint,
+    sections,
+    split_article,
+    split_long,
+)
 from gigarag.retrieval import Bm25Index, dense_search, top_k, union_ids
-from gigarag.text import contains_quote
+from gigarag.text import contains_quote, visible_text
 
 # ---------- patterns ----------
 
@@ -38,7 +47,24 @@ ARTICLE = """<div itemprop="articleBody"><p>Вступление</p><h4>Axe</h4>
 def test_article_sections_and_packing():
     assert split_article(ARTICLE, max_chars=1000) == ["Вступление", "Axe Броня +1 Ещё", "Lion Hex дальше"]
     assert sections([(False, "a"), (True, "H"), (False, "b")]) == [["a"], ["H", "b"]]
-    assert pack(["aaaa", "bbbb", "cc"], max_chars=8) == ["aaaa bbbb", "cc"]
+    assert pack(["aaaa", "bbbb", "cc"], max_chars=8) == ["aaaa", "bbbb cc"]  # пробел-разделитель учитывается
+
+
+def test_nested_containers_lose_no_text():
+    html = """<div itemprop="articleBody"><p>Интро</p><div><div><h5>Axe</h5><ul><li>Броня +1</li></ul>
+    Голый <b>текст</b> в div<li>пункт вне списка</li></div></div></div>"""
+    assert html_blocks(html) == [(False, "Интро"), (True, "Axe"), (False, "Броня +1"),
+                                 (False, "Голый текст в div"), (False, "пункт вне списка")]
+    article = {"doc_id": "a", "source": "dota2ru_article", "text": html}
+    assert " ".join(p.text for p in document_passages(article)) == visible_text(html)
+
+
+def test_split_long_respects_limit():
+    text = "Первое предложение. Второе подлиннее! " + "слово " * 30
+    pieces = pack([text], max_chars=25)
+    assert all(len(p) <= 25 for p in pieces)
+    assert " ".join(pieces).split() == text.split()
+    assert split_long("x" * 10, max_chars=4) == ["xxxx", "xxxx", "xx"]
 
 
 def test_document_passages_ids():
@@ -121,3 +147,10 @@ def test_read_env_file(tmp_path):
     (tmp_path / ".env").write_text("# comment\nA=1\nB = two=2\n")
     assert read_env_file(tmp_path / ".env") == {"A": "1", "B": "two=2"}
     assert read_env_file(tmp_path / "missing") == {}
+
+
+def test_passages_fingerprint_tracks_text_and_order():
+    a, b = Passage("d#0", "d", "раз"), Passage("d#1", "d", "два")
+    assert passages_fingerprint([a, b]) == passages_fingerprint([a, b])
+    assert passages_fingerprint([a, b]) != passages_fingerprint([b, a])
+    assert passages_fingerprint([a, b]) != passages_fingerprint([a, Passage("d#1", "d", "три")])

@@ -3,8 +3,10 @@ import json
 import pytest
 
 from gigarag import gold_coverage as coverage
-from gigarag.answer_eval import AnswerVerdict, load_verdicts, summary_by_type
-from gigarag.gold import Evidence, GoldItem
+from gigarag import patterns
+from gigarag.answer_eval import AnswerVerdict, abstention_verdict, load_verdicts, summary_by_type
+from gigarag.gold import Evidence, GoldItem, review_digest
+from gigarag.text import unsupported_words
 
 SOURCES = {"patch:7.38:a": "patchnotes", "patch:7.41:b": "patchnotes", "article:1": "dota2ru_article",
            "tg:1": "tg_Dota2"}
@@ -80,3 +82,32 @@ def test_summary_by_type_shares_and_total(tmp_path):
     assert summary.loc[("m", "factual"), ["correct", "incorrect", "abstained"]].tolist() == [50.0, 50.0, 0.0]
     assert summary.loc[("m", "ВСЕГО"), "n"] == 3
     assert summary.loc[("m", "ВСЕГО"), "score_%"] == 50.0
+
+
+def test_abstention_and_error_metrics_are_separate():
+    assert patterns.is_abstention("Не знаю.") and patterns.is_abstention("«не знаю», такого патча нет")
+    assert not patterns.is_abstention("Я не знаю точно, но урон 50")
+    assert abstention_verdict("negative") == "correct" and abstention_verdict("factual") == "abstained"
+    wrong_negative = AnswerVerdict("q", "negative", "m", "Урон +5", "incorrect")
+    assert wrong_negative.missed_abstention and not wrong_negative.hallucinated
+
+
+def test_unsupported_words_flags_wrong_slang_expansion():
+    evidence = ["Саппорты докупают нулик к арканам ради маны"]
+    assert unsupported_words("Саппорты докупают нулифаер ради маны", evidence) == ["нулифаер"]
+    assert unsupported_words("Саппорты докупили нулик", evidence) == []
+
+
+def test_review_digest_tracks_reviewed_content():
+    record = {"qtype": "factual", "question": "Q", "answer": "A", "seed_docs": ["d"], "labels": [], "cid": "c1"}
+    assert review_digest(record) == review_digest({**record, "cid": "c2"})
+    assert review_digest(record) != review_digest({**record, "answer": "B"})
+
+
+def test_sentences_split_after_terminal_punctuation():
+    assert patterns.sentences("Урон +5. Броня −1! Что дальше? Ок") == ["Урон +5.", "Броня −1!", "Что дальше?", "Ок"]
+
+
+def test_patch_mentions():
+    assert patterns.patch_mentions("в патчах 741 и 7.41F, потом 7.41f и 7.38") == ["7.41f", "7.38"]
+    assert patterns.patch_mentions("версия 17.41 и 7.410") == []

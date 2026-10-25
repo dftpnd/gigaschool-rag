@@ -28,6 +28,14 @@ def is_retryable(status_code: int) -> bool:
     return status_code == 429 or status_code >= 500
 
 
+def is_quota_exhausted(response: httpx.Response) -> bool:
+    """429 из-за кончившегося баланса API (`insufficient_quota`), а не из-за частоты запросов: повтор не поможет."""
+    try:
+        return response.json().get("error", {}).get("type") == "insufficient_quota"
+    except ValueError:
+        return False
+
+
 def send_with_retries(send: Callable[[], httpx.Response], retry: RetryPolicy,
                       sleep: Callable[[float], None] = time.sleep,
                       log: Callable[[str], None] = print) -> httpx.Response:
@@ -42,7 +50,7 @@ def send_with_retries(send: Callable[[], httpx.Response], retry: RetryPolicy,
                 raise
             reason = repr(e)
         else:
-            if not is_retryable(response.status_code) or last:
+            if not is_retryable(response.status_code) or is_quota_exhausted(response) or last:
                 return response.raise_for_status()
             reason = f"HTTP {response.status_code}"
         pause = retry.backoff(attempt)

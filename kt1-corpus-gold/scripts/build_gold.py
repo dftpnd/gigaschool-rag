@@ -20,17 +20,21 @@ import gold_prompts as P
 import numpy as np
 from gold_seeds import Seed, all_seeds
 
-from gigarag.cache import CacheStore, load_or_compute, read_npy, write_npy
+import gigarag.embeddings
+import gigarag.passages
+import gigarag.patterns
+import gigarag.text
+from gigarag.cache import CacheStore, code_fingerprint, load_or_compute, read_npy, write_npy
 from gigarag.corpus import read_jsonl
 from gigarag.dedup import jaccard, word_shingles
 from gigarag.embeddings import encode_passages
-from gigarag.gold import RELEVANT, Candidate, Evidence, GoldItem, save_gold, stratified_split
-from gigarag.llm import CachedChat, OpenAIChat, chat_request, parse_json_object
+from gigarag.gold import RELEVANT, Candidate, Evidence, GoldItem, review_digest, save_gold, stratified_split
+from gigarag.llm import CachedChat, ChatRequest, ChatResponse, OpenAIChat, chat_request, parse_json_object
 from gigarag.parallel import parallel_map
-from gigarag.passages import Passage, corpus_passages
-from gigarag.patterns import word_tokens
+from gigarag.passages import Passage, corpus_passages, passages_fingerprint
+from gigarag.patterns import patch_mentions, word_tokens
 from gigarag.retrieval import Bm25Index, dense_search, union_ids
-from gigarag.text import contains_quote, visible_text
+from gigarag.text import contains_quote, unsupported_words, visible_text
 from settings import CORPUS, DATA, SEED
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -47,6 +51,7 @@ DUPLICATE_QUESTION_JACCARD = 0.6  # вопросы с таким сходств�
 MIN_EVIDENCE_CHARS = 40           # отрывок короче не может сам по себе подтверждать ответ
 # Стили на 20 кандидатов: опечатки ~15%, остальные стили по 10%, ~45% без изменений.
 STYLE_CYCLE = ["typo"] * 3 + ["colloquial", "name_variant", "short", "long"] * 2 + [""] * 9
+PASSAGE_EMB_CODE = code_fingerprint(gigarag.patterns, gigarag.text, gigarag.passages, gigarag.embeddings)
 EMBEDDERS = {  # модель → (ревизия, префикс запроса, префикс отрывка, размер батча)
     "intfloat/multilingual-e5-small": ("614241f622f53c4eeff9890bdc4f31cfecc418b3", "query: ", "passage: ", 128),
     # BGE-M3 крупнее: батч поменьше, чтобы уместиться в свободную видеопамять рядом с другими процессами.
@@ -152,17 +157,22 @@ def stage_stylize() -> None:
 
 # ---------- label ----------
 
-def passage_embeddings(passages: list[Passage], cache: CacheStore) -> dict[str, np.ndarray]:
+def passage_embeddings(passages: list[Passage]) -> dict[str, np.ndarray]:
+    """Эмбеддинги отрывков по моделям. Кэш привязан к отпечатку упорядоченных отрывков и коду
+    нарезки и кодирования; размер загруженной матрицы сверяется с числом отрывков."""
     texts = [p.text for p in passages]
-    return {
-        model: load_or_compute(
-            cache.path("passage_emb", "npy", model=model, revision=rev, prefix=p_prefix, max_seq_length=512,
-                       passages=len(passages)),
-            lambda m=model, r=rev, pp=p_prefix, bs=batch: encode_passages(texts, m, r, max_seq_length=512, prefix=pp,
-                                                                         batch_size=bs),
+    cache = CacheStore(DATA / "cache", passages_fingerprint(passages))
+
+    def embed(model: str, rev: str, prefix: str, batch: int) -> np.ndarray:
+        vectors = load_or_compute(
+            cache.path("passage_emb", "npy", model=model, revision=rev, prefix=prefix, max_seq_length=512,
+                       code=PASSAGE_EMB_CODE),
+            lambda: encode_passages(texts, model, rev, max_seq_length=512, prefix=prefix, batch_size=batch),
             load=read_npy, save=write_npy)
-        for model, (rev, _, p_prefix, batch) in EMBEDDERS.items()
-    }
+        if vectors.shape[0] != len(passages):
+            raise ValueError(f"{model}: в кэше {vectors.shape[0]} векторов, отрывков {len(passages)}")
+        return vectors
+    return {model: embed(model, rev, p_prefix, batch) for model, (rev, _, p_prefix, batch) in EMBEDDERS.items()}
 
 
 def retrieval_queries(c: Candidate) -> list[str]:
@@ -171,10 +181,10 @@ def retrieval_queries(c: Candidate) -> list[str]:
     return list(dict.fromkeys(q for q in queries if q))
 
 
-def candidate_passages(candidates: list[Candidate], passages: list[Passage], cache: CacheStore) -> dict[str, list[int]]:
+def candidate_passages(candidates: list[Candidate], passages: list[Passage]) -> dict[str, list[int]]:
     """cid → индексы отрывков для судьи: объединение выдач трёх поисковиков плюс отрывки документов-затравок."""
     bm25 = Bm25Index.build([p.text for p in passages])
-    vectors = passage_embeddings(passages, cache)
+    vectors = passage_embeddings(passages)
     queries = {c.cid: retrieval_queries(c) for c in candidates}
     flat = sorted({q for qs in queries.values() for q in qs})
     query_vectors = {model: dict(zip(flat, encode_passages(flat, model, rev, max_seq_length=512, prefix=q_prefix,
@@ -193,29 +203,49 @@ def candidate_passages(candidates: list[Candidate], passages: list[Passage], cac
     return {c.cid: for_candidate(c) for c in candidates}
 
 
-def judge_request(c: Candidate, passage: Passage):
+def judge_request(c: Candidate, passage: Passage) -> ChatRequest:
     return chat_request(P.JUDGE_MODEL, P.JUDGE_SYSTEM, P.judge_user(c.question, c.answer, passage.text),
                         P.JUDGE_TEMPERATURE, P.LLM_SEED, True)
 
 
+def quote_retry_request(first: ChatRequest, reply: str) -> ChatRequest:
+    """Тот же диалог с судьёй плюс просьба скопировать цитату дословно."""
+    return replace(first, messages=(*first.messages, ("assistant", reply), ("user", P.QUOTE_RETRY_USER)))
+
+
+def judge_passage(chat: CachedChat, c: Candidate, passage: Passage) -> tuple[dict, list[ChatResponse]]:
+    """Оценка отрывка с проверенной цитатой. Положительная оценка без дословной цитаты — повторный запрос;
+    если и он не дал цитату, оценка обнуляется, а исходная сохраняется в `unverified_grade` для ревью."""
+    request = judge_request(c, passage)
+    first = chat.complete(request)
+    verdict = parse_json_object(first.content)
+    responses = [first]
+    if int(verdict["grade"]) > 0 and not contains_quote(passage.text, verdict.get("quote", "")):
+        retry = chat.complete(quote_retry_request(request, first.content))
+        verdict, responses = parse_json_object(retry.content), [first, retry]
+    grade, quote = int(verdict["grade"]), verdict.get("quote", "")
+    verified = grade == 0 or contains_quote(passage.text, quote)
+    label = {"passage_id": passage.passage_id, "doc_id": passage.doc_id,
+             "grade": grade if verified else 0, "quote": quote if verified and grade > 0 else ""}
+    return (label if verified else {**label, "unverified_grade": grade}), responses
+
+
 def stage_label() -> None:
-    docs, sha = load_corpus()
+    docs, _ = load_corpus()
     candidates = [candidate_from(r) for r in read_stage("styled")]
     passages = list(corpus_passages(docs.values()))
-    pools = candidate_passages(candidates, passages, CacheStore(DATA / "cache", sha))
+    pools = candidate_passages(candidates, passages)
     jobs = [(c, passages[i]) for c in candidates for i in pools[c.cid]]
     print("пар на разметку:", len(jobs))
     chat = llm()
-    responses = parallel_map(lambda job: chat.complete(judge_request(*job)), jobs, workers=12)
+    results = parallel_map(lambda job: judge_passage(chat, *job), jobs, workers=12)
     labels: dict[str, list[dict]] = {c.cid: [] for c in candidates}
-    for (c, passage), r in zip(jobs, responses, strict=True):
-        verdict = parse_json_object(r.content)
-        quote = verdict.get("quote", "")
-        labels[c.cid].append({"passage_id": passage.passage_id, "doc_id": passage.doc_id,
-                              "grade": int(verdict["grade"]),
-                              "quote": quote if contains_quote(passage.text, quote) else ""})
+    for (c, _), (label, _) in zip(jobs, results, strict=True):
+        labels[c.cid].append(label)
     write_stage("labeled", [{**asdict(c), "labels": labels[c.cid]} for c in candidates])
-    report_usage("label", responses)
+    report_usage("label", [r for _, responses in results for r in responses])
+    print("повторов цитаты:", sum(len(responses) > 1 for _, responses in results),
+          "снято положительных без цитаты:", sum("unverified_grade" in label for label, _ in results))
 
 
 # ---------- review ----------
@@ -224,10 +254,21 @@ def question_bigrams(text: str) -> frozenset[str]:
     return word_shingles(word_tokens(text.lower()), n=2)
 
 
-def auto_flags(record: dict, all_records: list[dict]) -> list[str]:
-    """Причины для отклонения, которые проверяются автоматически."""
+def other_patch_evidence(record: dict, doc_patch: dict[str, str | None]) -> list[str]:
+    """Отрывки с оценкой 2 из документов других патчей, чем названы в вопросе: судья часто засчитывает
+    правку той же сущности из соседнего патча. Для вопроса без номеров патчей — пусто."""
+    asked = set(patch_mentions(record["original_question"])) | set(patch_mentions(record["question"]))
+    return [x["passage_id"] for x in record["labels"] if x["grade"] >= RELEVANT and asked
+            and doc_patch.get(x["doc_id"]) and doc_patch[x["doc_id"]] not in asked]
+
+
+def auto_flags(record: dict, all_records: list[dict], doc_patch: dict[str, str | None]) -> list[str]:
+    """Причины для отклонения или правки разметки, которые проверяются автоматически."""
     relevant = [x for x in record["labels"] if x["grade"] >= RELEVANT]
     flags = []
+    other_patch = other_patch_evidence(record, doc_patch)
+    if other_patch:
+        flags.append(f"оценка 2 у отрывков других патчей: {', '.join(other_patch)}")
     if record["qtype"] == "negative" and relevant:
         flags.append(f"ответ найден в корпусе ({len(relevant)} отр.)")
     if record["qtype"] != "negative":
@@ -235,6 +276,9 @@ def auto_flags(record: dict, all_records: list[dict]) -> list[str]:
             flags.append("судья не подтвердил документ-затравку")
         if not record["meta"]["quotes_ok"]:
             flags.append("цитата генератора не найдена в документе")
+    unverified = [x for x in record["labels"] if "unverified_grade" in x]
+    if unverified:
+        flags.append(f"судья не дал дословную цитату — оценка снята у {len(unverified)} отр.")
     mine = question_bigrams(record["question"])
     duplicates = [o["cid"] for o in all_records if o["cid"] < record["cid"]
                   and jaccard(mine, question_bigrams(o["question"])) >= DUPLICATE_QUESTION_JACCARD]
@@ -244,16 +288,22 @@ def auto_flags(record: dict, all_records: list[dict]) -> list[str]:
 
 
 def stage_review() -> None:
+    docs, _ = load_corpus()
+    passage_text = {p.passage_id: p.text for p in corpus_passages(docs.values())}
+    doc_patch = {doc_id: d["patch"] for doc_id, d in docs.items()}
     records = read_stage("labeled")
     lines = []
     for r in records:
-        flags = auto_flags(r, records)
+        flags = auto_flags(r, records, doc_patch)
         relevant = [x for x in r["labels"] if x["grade"] >= RELEVANT]
-        lines += [f"## {r['cid']} · {r['qtype']} · {r['meta']['kind']} · стиль: {','.join(r['styles']) or '—'}",
+        unsupported = unsupported_words(r["answer"], [passage_text[x["passage_id"]] for x in relevant])
+        lines += [f"## {r['cid']} · {r['qtype']} · {r['meta']['kind']} · стиль: {','.join(r['styles']) or '—'}"
+                  f" · digest {review_digest(r)}",
                   f"Q: {r['question']}", *([f"Q0: {r['original_question']}"] if r["styles"] else []),
                   f"A: {r['answer']}", f"флаги: {'; '.join(flags) or 'нет'}",
+                  f"слова ответа вне доказательств: {', '.join(unsupported) or 'нет'}",
                   f"релевантных отрывков: {len(relevant)} из {len(r['labels'])}; затравки: {', '.join(r['seed_docs'])}",
-                  *[f"  - [{x['doc_id']}] {x['quote'][:120]}" for x in relevant[:6]], ""]
+                  *[f"  - [{x['passage_id']}] {x['quote'][:160]}" for x in relevant], ""]
     (WORK / "review_sheet.md").write_text("\n".join(lines), encoding="utf-8")
     print("лист ревью:", WORK / "review_sheet.md")
 
@@ -261,11 +311,13 @@ def stage_review() -> None:
 # ---------- finalize ----------
 
 def apply_overrides(labels: list[dict], overrides: list[dict]) -> list[dict]:
-    """Правки ревьюера поверх разметки судьи: оценка и цитата отрывка заменяются или добавляются."""
+    """Правки ревьюера поверх разметки судьи: оценка заменяется или добавляется; цитата — из правки,
+    а если её там нет, остаётся цитата судьи."""
     by_passage = {x["passage_id"]: x for x in labels}
     for o in overrides:
+        judged = by_passage.get(o["passage_id"], {})
         by_passage[o["passage_id"]] = {"passage_id": o["passage_id"], "doc_id": o["passage_id"].rsplit("#", 1)[0],
-                                       "grade": o["grade"], "quote": o.get("quote", "")}
+                                       "grade": o["grade"], "quote": o.get("quote", judged.get("quote", ""))}
     return list(by_passage.values())
 
 
@@ -284,11 +336,22 @@ def to_gold_item(record: dict, decision: dict, qid: str, passage_text: dict[str,
                     original_question=record["original_question"], seed_docs=tuple(record["seed_docs"]))
 
 
-def check_item(item: GoldItem) -> None:
-    """Инварианты набора: у негативного вопроса нет релевантных отрывков, у остальных — есть."""
+def check_item(item: GoldItem, passage_text: dict[str, str]) -> None:
+    """Инварианты набора: у негативного вопроса нет релевантных отрывков, у остальных — есть;
+    у каждого размеченного отрывка есть дословная цитата из него."""
     has_relevant = bool(item.relevant_docs())
     if (item.qtype == "negative") == has_relevant:
         raise ValueError(f"{item.qid}: тип {item.qtype}, релевантных документов {len(item.relevant_docs())}")
+    unquoted = [e.passage_id for e in item.evidence if not contains_quote(passage_text[e.passage_id], e.quote)]
+    if unquoted:
+        raise ValueError(f"{item.qid}: нет дословной цитаты у {unquoted}")
+
+
+def check_review_digests(decisions: dict[str, dict], records: dict[str, dict]) -> None:
+    """Решения ревью относятся к тому же содержимому кандидатов, которое просматривал ревьюер."""
+    stale = [cid for cid, d in decisions.items() if d.get("digest") != review_digest(records[cid])]
+    if stale:
+        raise ValueError(f"содержимое кандидатов изменилось после ревью: {stale}")
 
 
 def stage_finalize() -> None:
@@ -296,6 +359,7 @@ def stage_finalize() -> None:
     passage_text = {p.passage_id: p.text for p in corpus_passages(docs.values())}
     records = {r["cid"]: r for r in read_stage("labeled")}
     decisions = json.loads(REVIEW_FILE.read_text(encoding="utf-8"))
+    check_review_digests(decisions, records)
     accepted = [cid for cid in sorted(decisions) if decisions[cid]["decision"] == "accept"]
     per_type = Counter(records[cid]["qtype"] for cid in accepted)
     if per_type != Counter(QUOTAS):
@@ -304,7 +368,7 @@ def stage_finalize() -> None:
     items = [to_gold_item(records[cid], decisions[cid], f"q{i:02d}", passage_text)
              for i, cid in enumerate(ordered, start=1)]
     for item in items:
-        check_item(item)
+        check_item(item, passage_text)
     split = stratified_split(items, TEST_SHARE, SEED)
     items = [replace(i, split=split[i.qid]) for i in items]
     save_gold(items, GOLD_DIR / "gold.jsonl")

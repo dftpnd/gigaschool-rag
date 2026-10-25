@@ -5,6 +5,7 @@
 Цитата (`quote`) — дословный фрагмент отрывка: по ней релевантность переносится на любые чанки КТ 2.
 """
 
+import hashlib
 import json
 import random
 from collections import defaultdict
@@ -49,6 +50,13 @@ class GoldItem:
     def from_dict(cls, d: dict) -> "GoldItem":
         return cls(**{**d, "evidence": tuple(Evidence(**e) for e in d.get("evidence", ())),
                       "styles": tuple(d.get("styles", ())), "seed_docs": tuple(d.get("seed_docs", ()))})
+
+
+def review_digest(record: dict) -> str:
+    """Отпечаток того, что видел ревьюер: вопрос, ответ, затравки и разметка судьи. Решение ревью хранит его,
+    и финализация отказывается применять решение к кандидату с другим содержимым под тем же cid."""
+    seen = {k: record[k] for k in ("qtype", "question", "answer", "seed_docs", "labels")}
+    return hashlib.sha256(json.dumps(seen, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:16]
 
 
 def save_gold(items: Iterable[GoldItem], path: Path) -> None:

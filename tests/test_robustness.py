@@ -59,6 +59,19 @@ def test_send_with_retries_sleeps_with_backoff():
     assert pauses == [2]
 
 
+def test_exhausted_quota_is_not_retried():
+    calls: list[int] = []
+    request = httpx.Request("POST", "https://example.test")
+    body = {"error": {"type": "insufficient_quota", "message": "You have no credits remaining."}}
+
+    def send() -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(429, json=body, request=request)
+    with pytest.raises(httpx.HTTPStatusError):
+        send_with_retries(send, RetryPolicy(attempts=3, base_delay=0), sleep=lambda _: None, log=lambda _: None)
+    assert len(calls) == 1
+
+
 # ---------- атомарная запись ----------
 
 def test_interrupted_save_leaves_no_file(tmp_path):

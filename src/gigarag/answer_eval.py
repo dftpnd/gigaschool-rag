@@ -5,6 +5,9 @@
 - partial — верна только часть ответа;
 - incorrect — ответ неверен или выдуман (для негативного вопроса — любой содержательный ответ);
 - abstained — система отказалась отвечать на вопрос, у которого ответ есть.
+
+Две метрики ошибок не смешиваются: `hallucinated` — неверный содержательный ответ на вопрос, у которого
+ответ в корпусе есть; `missed_abstention` — содержательный ответ на негативный вопрос вместо отказа.
 """
 
 import json
@@ -14,6 +17,7 @@ from pathlib import Path
 import pandas as pd
 
 VERDICTS = ("correct", "partial", "incorrect", "abstained")
+NEGATIVE = "negative"
 
 
 @dataclass(frozen=True)
@@ -32,8 +36,18 @@ class AnswerVerdict:
 
     @property
     def hallucinated(self) -> bool:
-        """Содержательный неверный ответ (а не отказ) — выдумка модели."""
-        return self.verdict == "incorrect"
+        """Неверный содержательный ответ на вопрос, у которого есть эталон, — выдумка модели."""
+        return self.verdict == "incorrect" and self.qtype != NEGATIVE
+
+    @property
+    def missed_abstention(self) -> bool:
+        """Содержательный ответ на негативный вопрос: ответа в корпусе нет, а модель не отказалась."""
+        return self.verdict == "incorrect" and self.qtype == NEGATIVE
+
+
+def abstention_verdict(qtype: str) -> str:
+    """Вердикт отказа без судьи: для негативного вопроса отказ верен, для остальных — `abstained`."""
+    return "correct" if qtype == NEGATIVE else "abstained"
 
 
 def load_verdicts(path: Path) -> list[AnswerVerdict]:
@@ -41,18 +55,21 @@ def load_verdicts(path: Path) -> list[AnswerVerdict]:
 
 
 def verdict_table(verdicts: list[AnswerVerdict]) -> pd.DataFrame:
-    return pd.DataFrame([{**v.__dict__, "score": v.score, "hallucinated": v.hallucinated} for v in verdicts])
+    return pd.DataFrame([{**v.__dict__, "score": v.score, "hallucinated": v.hallucinated,
+                          "missed_abstention": v.missed_abstention} for v in verdicts])
 
 
 def summary_by_type(verdicts: list[AnswerVerdict]) -> pd.DataFrame:
-    """Доли вердиктов (в %), средний балл и доля выдумок по типам вопросов и в целом — для каждой модели."""
+    """Доли вердиктов (в %), средний балл, доли выдумок и пропущенных отказов по типам вопросов и в целом —
+    для каждой модели. Доли ошибок — от всех вопросов группы."""
     table = verdict_table(verdicts)
 
     def summarize(group: pd.DataFrame) -> pd.Series:
         shares = group["verdict"].value_counts(normalize=True).reindex(VERDICTS, fill_value=0) * 100
         return pd.concat([pd.Series({"n": len(group)}), shares,
                           pd.Series({"score_%": group["score"].mean() * 100,
-                                     "hallucinated_%": group["hallucinated"].mean() * 100})])
+                                     "hallucinated_%": group["hallucinated"].mean() * 100,
+                                     "missed_abstention_%": group["missed_abstention"].mean() * 100})])
 
     per_type = table.groupby(["model", "qtype"]).apply(summarize, include_groups=False)
     overall = table.groupby("model").apply(summarize, include_groups=False)

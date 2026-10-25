@@ -2,7 +2,10 @@
 
 import html
 
-from gigarag.patterns import collapse_whitespace, strip_tags
+from gigarag.patterns import collapse_whitespace, strip_tags, word_tokens
+
+MIN_CHECKED_WORD = 5  # короче — служебные слова и союзы, их отсутствие в доказательствах ничего не значит
+STEM_CHARS = 5        # грубая основа слова: «изменения» и «изменение» совпадают, «нулифаер» и «нулик» — нет
 
 
 def visible_text(raw: str) -> str:
@@ -32,3 +35,12 @@ def contains_quote(text: str, quote: str) -> bool:
 
 def _normalized(text: str) -> str:
     return collapse_whitespace(text).lower()
+
+
+def unsupported_words(answer: str, evidence_texts: list[str]) -> list[str]:
+    """Слова ответа (от MIN_CHECKED_WORD букв), основы которых (первые STEM_CHARS букв) нет ни в одном
+    доказательстве, — подсказка ревьюеру: ответ может приписывать источнику то, чего в нём нет
+    (например, раскрыть сленговое «нулик» не тем предметом)."""
+    stems = {w[:STEM_CHARS] for text in evidence_texts for w in word_tokens(text.lower())}
+    words = (w for w in word_tokens(answer.lower()) if len(w) >= MIN_CHECKED_WORD and not w.isdigit())
+    return list(dict.fromkeys(w for w in words if w[:STEM_CHARS] not in stems))

@@ -13,12 +13,15 @@ _TAG = re.compile(r"<[^>]+>")
 _ENTITY = re.compile(r"&(?:[a-zA-Z][a-zA-Z0-9]*|#\d+|#[xX][0-9a-fA-F]+);")
 _URL = re.compile(r"https?://[^\s\"'<>]+|www\.[^\s\"'<>]+|t\.me/[^\s\"'<>]+")
 _WHITESPACE = re.compile(r"\s+")
+_ABSTENTION = re.compile(r"^\W*не знаю\b", re.IGNORECASE)
+_SENTENCE_END = re.compile(r"(?<=[.!?…])\s+")
 _LETTERS = re.compile(r"[^\W\d_]+")
 _DIGITS = re.compile(r"\d+")
 _PUNCTUATION = re.compile(r"[.,!?:;…\-–—«»\"'()\[\]]")
 _SPECIAL = re.compile(r"[^\w\s]|_")
 _WORD_TOKEN = re.compile(r"\w+")
 _PATCH_VERSION = re.compile(r"7\.(\d+)([a-z]?)")
+_PATCH_MENTION = re.compile(r"(?<![\d.])7\.(\d{2})([a-z]?)(?![\w.])", re.IGNORECASE)
 _PATCH_IN_SLUG = re.compile(r"-7-(\d{2}[a-z]?)")
 _NEWS_LINK = re.compile(r'href="(/news/\d+-[^"?#]+)"')
 _DATETIME_ATTR = re.compile(r'<time datetime="([^"]+)"')
@@ -109,6 +112,11 @@ def collapse_whitespace(text: str) -> str:
     return _WHITESPACE.sub(" ", text).strip()
 
 
+def sentences(text: str) -> list[str]:
+    """Предложения: разрез по пробелу после «.», «!», «?» или «…»; пустые отброшены."""
+    return [s for s in _SENTENCE_END.split(text) if s]
+
+
 def word_tokens(text: str) -> list[str]:
     return _WORD_TOKEN.findall(text)
 
@@ -124,6 +132,11 @@ def parse_patch_version(version: str) -> tuple[int, str] | None:
     """`"7.36c"` → `(36, "c")`; не версия 7.xx → None."""
     m = _PATCH_VERSION.match(version)
     return (int(m.group(1)), m.group(2)) if m else None
+
+
+def patch_mentions(text: str) -> list[str]:
+    """Номера патчей, упомянутые в тексте, без повторов: «в 7.41 и 7.41F» → ["7.41", "7.41f"]."""
+    return list(dict.fromkeys(f"7.{m.group(1)}{m.group(2).lower()}" for m in _PATCH_MENTION.finditer(text)))
 
 
 def patch_from_slug(slug: str) -> str | None:
@@ -144,6 +157,11 @@ def has_digit(text: str) -> bool:
 def mentions_word(text: str, phrase: str) -> bool:
     """Фраза встречается в тексте как отдельное слово (без учёта регистра)."""
     return re.search(word_boundary_pattern(phrase), text, re.IGNORECASE) is not None
+
+
+def is_abstention(answer: str) -> bool:
+    """Ответ — отказ: начинается с «Не знаю» (так велит отвечать системный промпт при незнании)."""
+    return bool(_ABSTENTION.match(answer))
 
 
 def has_ads_marker(text: str) -> bool:
