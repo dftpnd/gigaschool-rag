@@ -23,3 +23,12 @@ def latin_letter_share(text: str) -> float:
 
 def is_mostly_latin(text: str, threshold: float = 0.5) -> bool:
     return latin_letter_share(text) > threshold
+
+
+def contains_quote(text: str, quote: str) -> bool:
+    """Цитата дословно есть в тексте — с точностью до регистра и пробелов."""
+    return bool(quote.strip()) and _normalized(quote) in _normalized(text)
+
+
+def _normalized(text: str) -> str:
+    return collapse_whitespace(text).lower()

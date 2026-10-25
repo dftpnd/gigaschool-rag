@@ -15,6 +15,7 @@ dependencies = [
     "nbformat>=5.11.1",
     "pandas>=3.1.0",
     "pyarrow>=26.0.0",
+    "rank-bm25>=0.2.2",
     "scikit-learn>=1.9.1",
     "selectolax>=0.3",
     "sentence-transformers>=6.2.0",

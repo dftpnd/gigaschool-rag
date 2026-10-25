@@ -24,6 +24,8 @@ _NEWS_LINK = re.compile(r'href="(/news/\d+-[^"?#]+)"')
 _DATETIME_ATTR = re.compile(r'<time datetime="([^"]+)"')
 _ADS_MARKER = re.compile(r"промокод|ставк|казино|букмекер|фрибет|реклама|erid|бездеп", re.IGNORECASE)
 _TOPIC_WORD = re.compile(r"(?u)\b[^\W\d_]{3,}\b")
+_NUMERIC_CHANGE = re.compile(r"\bс\s+[\d.,/%]+\s*%?\s+(?:до|на)\s+[\d.,/%]+")
+_HAS_DIGIT = re.compile(r"\d")
 
 
 def _spans(rx: re.Pattern, text: str) -> list[Span]:
@@ -130,6 +132,20 @@ def patch_from_slug(slug: str) -> str | None:
     return f"7.{m.group(1)}" if m else None
 
 
+def has_numeric_change(text: str) -> bool:
+    """Правка с числами: «урон увеличен с 75 до 80», «с 3 на 2»."""
+    return _NUMERIC_CHANGE.search(text) is not None
+
+
+def has_digit(text: str) -> bool:
+    return _HAS_DIGIT.search(text) is not None
+
+
+def mentions_word(text: str, phrase: str) -> bool:
+    """Фраза встречается в тексте как отдельное слово (без учёта регистра)."""
+    return re.search(word_boundary_pattern(phrase), text, re.IGNORECASE) is not None
+
+
 def has_ads_marker(text: str) -> bool:
     """Явные маркеры рекламы ставок. «Бонус» не входит: в патчноутах это игровой термин."""
     return _ADS_MARKER.search(text) is not None
@@ -138,6 +154,15 @@ def has_ads_marker(text: str) -> bool:
 def word_boundary_pattern(phrase: str) -> str:
     """Фраза как отдельное слово, без интерпретации спецсимволов."""
     return rf"\b{re.escape(phrase)}\b"
+
+
+def build_phrase_finder(phrases: Iterable[str]) -> Callable[[str], set[str]]:
+    """Функция «какие из фраз встречаются в тексте как отдельные слова» — один проход по тексту.
+    Возвращает фразы в исходном написании; длинные фразы проверяются раньше коротких."""
+    by_lower = {p.lower(): p for p in phrases}
+    ordered = sorted(by_lower, key=len, reverse=True)
+    rx = re.compile("|".join(word_boundary_pattern(p) for p in ordered), re.IGNORECASE)
+    return lambda text: {by_lower[m.group(0).lower()] for m in rx.finditer(text)}
 
 
 def build_any_matcher(patterns: Iterable[str]) -> Callable[[str], bool]:
