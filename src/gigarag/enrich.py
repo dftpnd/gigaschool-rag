@@ -6,6 +6,7 @@
 индексируются своим текстом в обоих вариантах.
 """
 
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -48,7 +49,16 @@ def questions_request(text: str) -> ChatRequest:
 
 
 def parse_questions(content: str) -> list[str]:
-    questions = parse_json_object(content).get("questions", [])
+    """Вопросы из ответа модели; пустой список, если JSON битый.
+
+    JSON-режим DeepSeek не гарантирует валидность (~0,6% ответов: оборванная строка, висячая запятая,
+    неверный escape). Такой чанк индексируется своим текстом, как короткие, — повтор запроса с тем же seed
+    вернул бы тот же ответ.
+    """
+    try:
+        questions = parse_json_object(content).get("questions", [])
+    except json.JSONDecodeError:
+        return []
     return [q.strip() for q in questions if isinstance(q, str) and q.strip()]
 
 

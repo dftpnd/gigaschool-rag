@@ -106,3 +106,11 @@ class CachedChat:
 def parse_json_object(content: str) -> dict:
     """JSON-объект из ответа модели (в JSON-режиме ответ — ровно объект)."""
     return json.loads(content)
+
+
+def is_json_object(content: str) -> bool:
+    """Разбирается ли ответ модели как JSON-объект: JSON-режим этого не гарантирует."""
+    try:
+        return isinstance(json.loads(content), dict)
+    except json.JSONDecodeError:
+        return False

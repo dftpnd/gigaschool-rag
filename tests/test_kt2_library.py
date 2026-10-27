@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from gigarag import cleaning, enrich, metadata, metrics, patterns, search
+from gigarag import cleaning, enrich, llm, metadata, metrics, patterns, search
 from gigarag.chunking import Chunk, ChunkerSpec, child_chunks, chunk_boundaries, chunk_documents, chunk_length_stats
 from gigarag.corpus import Document
 from gigarag.dedup import connected_components
@@ -176,6 +176,9 @@ def test_patch_filter_and_prefix():
 
 def test_enrich_helpers():
     assert enrich.parse_questions('{"questions": [" a ", "", 3, "b"]}') == ["a", "b"]
+    assert enrich.parse_questions('{"questions": ["оборван') == []
+    assert llm.is_json_object('{"questions": []}') and not llm.is_json_object('{"q": "оборван')
+    assert not llm.is_json_object('["список"]')
     assert enrich.eligible([5, 30, 100], min_tokens=30) == [1, 2]
     assert enrich.Usage(1, 1_000_000, 1_000_000, 0).cost_usd == pytest.approx(sum(enrich.PRICE_PER_MILLION))
 

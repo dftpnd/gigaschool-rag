@@ -48,7 +48,7 @@ import gigarag.chunking
 import gigarag.cleaning
 import gigarag.noise
 import gigarag.patterns
-from gigarag import cleaning, metrics, noise, tokens
+from gigarag import cleaning, llm, metrics, noise, tokens
 from gigarag.cache import CacheStore, code_fingerprint, load_or_compute, read_parquet, write_parquet
 from gigarag.chunking import ChunkerResources, ChunkerSpec, build_chunker, chunk_length_stats
 from gigarag.corpus import Document, read_jsonl
@@ -561,6 +561,10 @@ summary_entries = Entries([summary_text.get(i, text) for i, text in enumerate(be
 chunk_questions = dict(zip(llm_targets, (enrich.parse_questions(r["content"]) for r in questions), strict=True))
 question_pairs = [(q, i) for i, text in enumerate(best_texts) for q in chunk_questions.get(i) or [text]]
 question_entries = Entries([q for q, _ in question_pairs], [i for _, i in question_pairs])
+broken_json = sum(not llm.is_json_object(r["content"]) for r in questions)
+no_questions = sum(not chunk_questions[i] for i in llm_targets)
+print(f"Ответов без вопросов — {no_questions} из {len(llm_targets)}: битый JSON — {broken_json}, "
+      f"остальные — отказ модели (пустой список, «фрагмент не про Dota»). Такие чанки индексируются своим текстом")
 example = llm_targets[len(llm_targets) // 2]
 print("ЧАНК:", best_texts[example][:400], "\n\nРЕЗЮМЕ:", summary_text[example],
       "\n\nВОПРОСЫ:", chunk_questions[example])
