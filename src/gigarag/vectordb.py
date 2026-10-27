@@ -22,6 +22,7 @@ from gigarag.retrieval import Ranking
 QDRANT_IMAGE = "qdrant/qdrant:v1.19.2"
 QDRANT_PORT = 6333
 READY_TIMEOUT_S = 60
+INDEX_TIMEOUT_S = 600
 UPSERT_BATCH = 1024
 MIB = 2 ** 20
 
@@ -133,25 +134,31 @@ def build_collection(client, name: str, vectors: np.ndarray, config: IndexConfig
 
 
 def wait_loaded(client, name: str) -> None:
-    """Ждёт, пока коллекция после перезапуска поднимется с диска и станет зелёной."""
+    """Ждёт, пока коллекция после перезапуска поднимется с диска. Статус после перезапуска — зелёный или серый:
+    серый значит «оптимизация отложена до следующей записи», индекс при этом загружен и поиск работает."""
     from qdrant_client import models
-    while True:
+    ready = {models.CollectionStatus.GREEN, models.CollectionStatus.GREY}
+    deadline = time.monotonic() + INDEX_TIMEOUT_S
+    while time.monotonic() < deadline:
         try:
-            if client.get_collection(name).status == models.CollectionStatus.GREEN:
+            if client.get_collection(name).status in ready:
                 return
         except Exception:  # пока коллекция загружается, API отвечает ошибкой
             pass
         time.sleep(0.2)
+    raise TimeoutError(f"коллекция {name} не загрузилась за {INDEX_TIMEOUT_S} с")
 
 
 def _wait_indexed(client, name: str, n_vectors: int, config: IndexConfig) -> None:
     from qdrant_client import models
-    while True:
+    deadline = time.monotonic() + INDEX_TIMEOUT_S
+    while time.monotonic() < deadline:
         info = client.get_collection(name)
         indexed = config.exact or (info.indexed_vectors_count or 0) >= n_vectors
         if info.status == models.CollectionStatus.GREEN and indexed:
             return
         time.sleep(0.1)
+    raise TimeoutError(f"индекс {name} не построился за {INDEX_TIMEOUT_S} с")
 
 
 def search(client, name: str, query_vectors: Sequence[np.ndarray], config: IndexConfig, limit: int
