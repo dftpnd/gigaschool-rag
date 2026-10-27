@@ -21,6 +21,7 @@ import pandas as pd
 
 from gigarag.gold import RELEVANT, GoldItem
 from gigarag.relevance import EvidenceChunks, Qrels, chunk_grades, relevant_chunk_ids
+from gigarag.retrieval import Ranking
 
 K_VALUES = (1, 5, 10)
 
@@ -142,3 +143,31 @@ def paired_changes(per_q: pd.DataFrame, base: str, other: str, metric: str = "R@
     delta = wide[other] - wide[base]
     return pd.DataFrame({"лучше": (delta > 0).groupby(level=0).sum(), "хуже": (delta < 0).groupby(level=0).sum(),
                          "без изменений": (delta == 0).groupby(level=0).sum()})
+
+
+def threshold_curve(rankings: Mapping[str, Ranking], qrels: Qrels, items: Sequence[GoldItem],
+                    thresholds: Sequence[float], k: int = CONTEXT_K) -> pd.DataFrame:
+    """Компромисс precision/recall порога по score реранкера: в контекст идут чанки топ-k со score ≥ порога.
+
+    - precision — доля релевантных среди всех оставленных чанков (микро-среднее по вопросам с доказательствами);
+    - recall — средний R@k по вопросам с доказательствами после отсечения;
+    - F1 = 2PR / (P + R);
+    - «негативные без контекста» — доля негативных вопросов, у которых не осталось ни одного чанка:
+      генератор получит пустой контекст и должен ответить «не знаю».
+    """
+    answered = [i for i in items if has_evidence(qrels[i.qid])]
+    negatives = [i for i in items if not has_evidence(qrels[i.qid])]
+
+    def point(threshold: float) -> dict:
+        kept = {i.qid: [doc for doc, s in rankings[i.qid][:k] if s >= threshold] for i in items}
+        relevant_kept = sum(len(set(kept[i.qid]) & relevant_chunk_ids(qrels[i.qid])) for i in answered)
+        total_kept = sum(len(kept[i.qid]) for i in answered)
+        precision = relevant_kept / total_kept if total_kept else 0.0
+        recall = sum(recall_at_k(kept[i.qid], qrels[i.qid], k) for i in answered) / len(answered) if answered else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+        return {"порог": threshold, "precision": precision, "recall": recall, "F1": f1,
+                "чанков в контексте": total_kept / len(answered) if answered else 0.0,
+                "негативные без контекста": (sum(not kept[i.qid] for i in negatives) / len(negatives)
+                                             if negatives else 0.0)}
+
+    return pd.DataFrame([point(t) for t in thresholds])

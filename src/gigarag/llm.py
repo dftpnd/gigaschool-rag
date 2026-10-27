@@ -7,6 +7,7 @@
 import hashlib
 import json
 import os
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -43,6 +44,7 @@ class ChatResponse:
     prompt_tokens: int
     completion_tokens: int
     cached: bool = False
+    seconds: float = 0.0  # время ответа API при первом запросе; из кэша возвращается сохранённое, а не время чтения
 
 
 def chat_request(model: str, system: str, user: str, temperature: float,
@@ -78,12 +80,14 @@ class OpenAIChat:
                    base_url=env.get(f"{prefix}_BASE_URL", base_url or cls.base_url))
 
     def complete(self, request: ChatRequest) -> ChatResponse:
+        start = time.perf_counter()
         response = send_with_retries(
             lambda: self._client.post(f"{self.base_url}/chat/completions", json=request.payload()), self.retry)
+        seconds = time.perf_counter() - start  # с повторами после 429/5xx: столько ждёт пользователь
         body = response.json()
         usage = body.get("usage", {})
         return ChatResponse(body["choices"][0]["message"]["content"],
-                            usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0))
+                            usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0), seconds=seconds)
 
 
 @dataclass
