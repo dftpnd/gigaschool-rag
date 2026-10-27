@@ -68,6 +68,15 @@ def build_qrels(items: Sequence[GoldItem], chunks: Sequence[Chunk], aliases: Map
             for item in items}
 
 
+def chunk_grades(evidence: Sequence[EvidenceChunks]) -> dict[int, int]:
+    """Оценка каждого размеченного чанка — наибольшая из оценок доказательств, которые в нём есть."""
+    grades: dict[int, int] = {}
+    for e in evidence:
+        for i in e.chunks:
+            grades[i] = max(grades.get(i, 0), e.grade)
+    return grades
+
+
 def relevant_chunk_ids(evidence: Sequence[EvidenceChunks], min_grade: int = RELEVANT) -> frozenset[int]:
     return frozenset().union(*(e.chunks for e in evidence if e.grade >= min_grade))
 

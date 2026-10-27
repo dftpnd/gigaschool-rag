@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping, Sequence
 
 import numpy as np
 
-from gigarag.retrieval import Bm25Index, bm25_tokens, top_k
+from gigarag.retrieval import Bm25Index, Ranking, bm25_tokens, top_k
 
 Scorer = Callable[[str], np.ndarray]  # запрос → score каждой записи индекса
 DEPTH = 10                            # глубина выдачи: максимальное k в метриках
@@ -55,3 +55,12 @@ def dense_scorer(entry_vectors: np.ndarray, query_vectors: Mapping[str, np.ndarr
 def one_entry_per_chunk(texts: Sequence[str]) -> tuple[list[str], list[int]]:
     """Простейший индекс: запись = текст чанка."""
     return list(texts), list(range(len(texts)))
+
+
+def filter_ranking(ranking: Ranking, allowed: np.ndarray | None) -> Ranking:
+    """Выдача без чанков, не прошедших фильтр метаданных (маска по индексам чанков)."""
+    return ranking if allowed is None else [(i, s) for i, s in ranking if allowed[i]]
+
+
+def ranked_ids(ranking: Ranking) -> list[int]:
+    return [i for i, _ in ranking]

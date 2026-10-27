@@ -1,4 +1,4 @@
-"""Метрики ретрива по чанкам: Hit@k, Recall@k, Precision@k, MRR.
+"""Метрики ретрива по чанкам: Hit@k, Recall@k, Precision@k, NDCG@k, MAP, MRR.
 
 Ранжирование — список индексов чанков по убыванию score. Релевантные — чанки с доказательством оценки 2.
 - Hit@k — в топ-k есть хотя бы одно доказательство вопроса.
@@ -8,15 +8,19 @@
 - Precision@k — доля релевантных чанков в топ-k. Разметка gold неполна (судья видел только кандидатов
   трёх поисковиков), поэтому это оценка снизу.
 - MRR — 1 / место первого релевантного чанка (0, если его нет в выдаче).
-Негативные вопросы доказательств не имеют и в метриках ретрива не участвуют.
+- NDCG@k — градуированная: выигрыш чанка 2^оценка − 1 (оценка 2 — ответ, 1 — по теме без ответа).
+- MAP — среднее по вопросам AP@10 по релевантным чанкам.
+Негативные вопросы доказательств не имеют и в метриках ретрива не участвуют; для них считается доля
+«похожих, но не ответ» в выдаче (`negative_per_question`).
 """
 
+import math
 from collections.abc import Mapping, Sequence
 
 import pandas as pd
 
 from gigarag.gold import RELEVANT, GoldItem
-from gigarag.relevance import EvidenceChunks, Qrels, relevant_chunk_ids
+from gigarag.relevance import EvidenceChunks, Qrels, chunk_grades, relevant_chunk_ids
 
 K_VALUES = (1, 5, 10)
 
@@ -44,6 +48,27 @@ def reciprocal_rank(ranking: Sequence[int], evidence: Sequence[EvidenceChunks]) 
     return next((1 / rank for rank, i in enumerate(ranking, 1) if i in relevant), 0.0)
 
 
+def dcg(gains: Sequence[float]) -> float:
+    """DCG = Σ_i gain_i / log2(i + 1), i — место с единицы."""
+    return sum(g / math.log2(rank + 1) for rank, g in enumerate(gains, 1))
+
+
+def ndcg_at_k(ranking: Sequence[int], evidence: Sequence[EvidenceChunks], k: int) -> float:
+    """NDCG@k = DCG выдачи / DCG идеальной выдачи; выигрыш чанка — 2^оценка − 1."""
+    grades = chunk_grades(evidence)
+    gains = [2 ** grades.get(i, 0) - 1 for i in ranking[:k]]
+    ideal = dcg(sorted((2 ** g - 1 for g in grades.values()), reverse=True)[:k])
+    return dcg(gains) / ideal if ideal else 0.0
+
+
+def average_precision(ranking: Sequence[int], evidence: Sequence[EvidenceChunks], k: int) -> float:
+    """AP@k = Σ P@i по местам i ≤ k с релевантным чанком / min(|релевантные|, k)."""
+    relevant = relevant_chunk_ids(evidence)
+    hits = [rank for rank, i in enumerate(ranking[:k], 1) if i in relevant]
+    precisions = (n / rank for n, rank in enumerate(hits, 1))
+    return sum(precisions) / min(len(relevant), k) if relevant else 0.0
+
+
 def has_evidence(evidence: Sequence[EvidenceChunks]) -> bool:
     return any(e.grade >= RELEVANT for e in evidence)
 
@@ -61,13 +86,24 @@ def per_question(rankings: Mapping[str, Sequence[int]], qrels: Qrels, items: Seq
         if not has_evidence(evidence):
             continue
         ranking = rankings[item.qid]
-        row = {"qid": item.qid, "qtype": item.qtype, "split": item.split, "MRR": reciprocal_rank(ranking, evidence)}
+        row = {"qid": item.qid, "qtype": item.qtype, "split": item.split, "MRR": reciprocal_rank(ranking, evidence),
+               "MAP": average_precision(ranking, evidence, max(k_values))}
         for k in k_values:
             row |= {f"Hit@{k}": hit_at_k(ranking, evidence, k), f"R@{k}": recall_at_k(ranking, evidence, k),
-                    f"P@{k}": precision_at_k(ranking, evidence, k)}
+                    f"P@{k}": precision_at_k(ranking, evidence, k), f"NDCG@{k}": ndcg_at_k(ranking, evidence, k)}
         if chunk_tokens is not None:
             row[f"tokens@{CONTEXT_K}"] = sum(chunk_tokens[i] for i in ranking[:CONTEXT_K])
         rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def negative_per_question(rankings: Mapping[str, Sequence[int]], qrels: Qrels, items: Sequence[GoldItem],
+                          k: int = 5) -> pd.DataFrame:
+    """Для вопросов без ответа в корпусе — доля топ-k, занятая чанками «по теме, но без ответа» (оценка 1):
+    чем она выше, тем правдоподобнее контекст, на котором генератор может выдумать ответ."""
+    rows = [{"qid": item.qid, "qtype": item.qtype, "split": item.split,
+             f"near@{k}": sum(i in chunk_grades(qrels[item.qid]) for i in rankings[item.qid][:k]) / k}
+            for item in items if not has_evidence(qrels[item.qid])]
     return pd.DataFrame(rows)
 
 
