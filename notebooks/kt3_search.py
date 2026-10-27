@@ -249,9 +249,11 @@ best_gold_vectors, best_latency_vectors, best_embed_latency = model_query_vector
 # - **HNSW m=32, ef=128 + int8** — плотный граф и скалярная квантизация: в RAM — int8-копии векторов (в 4 раза
 #   меньше), исходные лежат на диске (mmap); найденные кандидаты пересчитываются по исходным (`rescore`).
 #
-# Каждая конфигурация — в свежем контейнере, поэтому пик памяти (`memory.peak` cgroup контейнера) относится
-# к одному индексированию. Пик cgroup включает страничный кэш файлов, которые Qdrant пишет на диск, поэтому
-# рядом — собственная память процесса после индексирования (`anon`): столько RAM индекс занимает на самом деле.
+# Каждая конфигурация — в свежем контейнере, поэтому пик памяти при индексировании (`memory.peak` cgroup
+# контейнера) относится к одному индексированию. В пик входят страничный кэш файлов, которые Qdrant пишет
+# на диск, и куча после разбора загрузки (векторы приходят JSON-ом по HTTP), поэтому отдельно — **RAM индекса**:
+# контейнер перезапускается, Qdrant поднимает коллекцию с диска, и после запросов берётся собственная память
+# процесса плюс отображённые в память файлы (`anon` + `file_mapped`). Запросы и выдачи — после перезапуска.
 # Время запроса — медиана по 100 запросам (top-10, по одному запросу, HTTP-клиент на той же машине); векторы запросов
 # посчитаны заранее, время эмбеддинга запроса — в разделе 2.
 # **ANN recall@10** — доля точного топ-10 (flat), которую нашёл приближённый индекс.
@@ -272,10 +274,14 @@ def qdrant_run(config: IndexConfig, vectors: np.ndarray, gold_vectors: dict, lat
         with QdrantContainer() as qdrant:
             client = qdrant.client()
             seconds = build_collection(client, "chunks", vectors, config)
-            peak, anon = qdrant.peak_memory_mb(), qdrant.anon_memory_mb()
+            peak = qdrant.peak_memory_mb()
+            qdrant.restart()
+            client = qdrant.client()
+            vectordb.wait_loaded(client, "chunks")
             rankings, _ = vectordb.search(client, "chunks", list(gold_vectors.values()), config, POOL)
             _, latencies = vectordb.search(client, "chunks", latency_vectors, config, DEPTH)
-        return {"index_seconds": seconds, "peak_mb": peak, "anon_mb": anon, "latencies": latencies.tolist(),
+            resident = qdrant.resident_memory_mb()  # после запросов: рабочий набор страниц уже в памяти
+        return {"index_seconds": seconds, "peak_mb": peak, "resident_mb": resident, "latencies": latencies.tolist(),
                 "rankings": dict(zip(gold_vectors, rankings, strict=True))}
     path = cache.path(f"qdrant_{label}", "json", vectors=array_fingerprint(vectors), image=vectordb.QDRANT_IMAGE,
                       limit=POOL, **config.params())
@@ -289,7 +295,7 @@ index_per_q = pd.concat([evaluate(name, "dense", run["rankings"]) for name, run 
 index_table = pd.DataFrame([{
     "config": name, "индексирование, с": run["index_seconds"], "запрос, мс": np.median(run["latencies"]) * 1000,
     "p95, мс": np.percentile(run["latencies"], 95) * 1000, "пик RAM, МБ": run["peak_mb"],
-    "RAM процесса, МБ": run["anon_mb"],
+    "RAM индекса, МБ": run["resident_mb"],
     "ANN recall@10, %": 100 * np.mean([metrics.overlap_at_k(ranked_ids(r), exact_top[qid], DEPTH)
                                        for qid, r in run["rankings"].items()]),
 } for name, run in index_runs.items()]).set_index("config")
@@ -313,11 +319,11 @@ for share in (0.1, 0.25, 0.5, 1.0):
     scale_rows.append({"доля корпуса": share, "векторов": len(subset), "индексирование, с": run["index_seconds"],
                        "запрос, мс": np.median(run["latencies"]) * 1000,
                        "p95, мс": np.percentile(run["latencies"], 95) * 1000, "пик RAM, МБ": run["peak_mb"],
-                       "RAM процесса, МБ": run["anon_mb"]})
+                       "RAM индекса, МБ": run["resident_mb"]})
 scale_table = pd.DataFrame(scale_rows).round(2)
 display(scale_table)
 fig, axes = plt.subplots(1, 3, figsize=(13, 3.4))
-for ax, column in zip(axes, ["запрос, мс", "RAM процесса, МБ", "индексирование, с"], strict=True):
+for ax, column in zip(axes, ["запрос, мс", "RAM индекса, МБ", "индексирование, с"], strict=True):
     ax.plot(scale_table["векторов"], scale_table[column], marker="o")
     ax.set_title(column)
     ax.set_xlabel("векторов в индексе")
@@ -484,12 +490,12 @@ summary(pd.concat([pipeline_per_q[pipeline_per_q["config"] == best_hybrid], filt
 #
 # Строка — модель × индекс × пайплайн. Метрики — validation, R@5 и NDCG@5 — ещё и на test. Время запроса —
 # медиана по 100 запросам: dense = эмбеддинг запроса + поиск (numpy или Qdrant), hybrid = dense + BM25
-# (слияние — доли миллисекунды). RAM: у Qdrant — память процесса после индексирования (без страничного кэша), у numpy —
+# (слияние — доли миллисекунды). RAM: у Qdrant — RAM рабочего индекса после перезапуска, у numpy —
 # массив векторов, у BM25 — аллокации Python при построении индекса; у hybrid — сумма компонентов.
 
 # %%
 bm25_ms = np.median(bm25_query_seconds) * 1000
-dense_ram = index_table.loc[best_index, "RAM процесса, МБ"]
+dense_ram = index_table.loc[best_index, "RAM индекса, МБ"]
 final_rows = []
 
 
@@ -505,7 +511,7 @@ for name in model_table.index:
             model_table.loc[name, "запрос, мс"], model_vectors[name].nbytes / 2 ** 20)
 for name in index_table.index:
     add_row(best_model, f"Qdrant {name}", "dense", index_per_q[index_per_q["config"] == name],
-            best_embed_latency * 1000 + index_table.loc[name, "запрос, мс"], index_table.loc[name, "RAM процесса, МБ"])
+            best_embed_latency * 1000 + index_table.loc[name, "запрос, мс"], index_table.loc[name, "RAM индекса, МБ"])
 add_row("—", "BM25 k1=1.5, b=0.75", "sparse", evaluate("default", "bm25", bm25_rankings(bm25_default)), bm25_ms,
         bm25_peak_mb)
 add_row("—", f"BM25 k1={best_k1}, b={best_b}", "sparse", pipeline_per_q[pipeline_per_q["config"] == "BM25"],

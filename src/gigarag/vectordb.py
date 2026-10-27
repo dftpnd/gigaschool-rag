@@ -1,9 +1,10 @@
 """Векторная БД Qdrant в Docker: конфигурации индекса, индексирование, поиск и замер памяти.
 
 Каждая конфигурация индексируется в свежем контейнере: пик памяти контейнера (`memory.peak` cgroup v2)
-тогда относится к одному индексированию, а не к сумме всех предыдущих. Пик cgroup включает страничный кэш
-файлов, которые Qdrant пишет на диск (WAL, сегменты), поэтому рядом меряется и собственная память процесса
-(`anon` из `memory.stat`) — столько RAM индекс занимает на самом деле.
+тогда относится к одному индексированию, а не к сумме всех предыдущих. Пик включает страничный кэш файлов,
+которые Qdrant пишет на диск, и кучу, оставшуюся после разбора загрузки. Поэтому отдельно меряется
+RAM рабочего индекса: контейнер перезапускается, Qdrant заново поднимает коллекцию с диска, и берётся
+собственная память процесса плюс отображённые в память файлы (векторы и граф Qdrant держит через mmap).
 """
 
 import socket
@@ -91,10 +92,16 @@ class QdrantContainer:
         """Пиковая память контейнера с момента запуска, МБ (cgroup v2 `memory.peak`, со страничным кэшем)."""
         return int(self._cgroup_file("memory.peak")) / MIB
 
-    def anon_memory_mb(self) -> float:
-        """Текущая собственная память процессов контейнера без страничного кэша, МБ (`anon` в `memory.stat`)."""
+    def resident_memory_mb(self) -> float:
+        """Текущая RAM процессов контейнера, МБ: собственная память (`anon`) + отображённые файлы
+        (`file_mapped`) из `memory.stat`; кэш файлов, которые никто не отобразил, не считается."""
         stats = dict(line.split() for line in self._cgroup_file("memory.stat").splitlines())
-        return int(stats["anon"]) / MIB
+        return (int(stats["anon"]) + int(stats["file_mapped"])) / MIB
+
+    def restart(self) -> None:
+        """Перезапуск процесса с теми же данными: коллекции поднимаются с диска, куча загрузки уходит."""
+        subprocess.run(["docker", "restart", self.name], check=True, capture_output=True)
+        self._wait_ready()
 
     def client(self):
         from qdrant_client import QdrantClient
@@ -123,6 +130,18 @@ def build_collection(client, name: str, vectors: np.ndarray, config: IndexConfig
                                                 vectors=batch.tolist()), wait=True)
     _wait_indexed(client, name, len(vectors), config)
     return time.perf_counter() - start
+
+
+def wait_loaded(client, name: str) -> None:
+    """Ждёт, пока коллекция после перезапуска поднимется с диска и станет зелёной."""
+    from qdrant_client import models
+    while True:
+        try:
+            if client.get_collection(name).status == models.CollectionStatus.GREEN:
+                return
+        except Exception:  # пока коллекция загружается, API отвечает ошибкой
+            pass
+        time.sleep(0.2)
 
 
 def _wait_indexed(client, name: str, n_vectors: int, config: IndexConfig) -> None:
