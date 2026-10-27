@@ -22,6 +22,7 @@ SEED = 42
 PROMPT_VERSION = 1
 MIN_TOKENS = 30
 QUESTIONS_PER_CHUNK = 3
+LLM_WORKERS = 32  # DeepSeek не ограничивает частоту запросов жёстко; узкое место — задержка ответа
 # Цены DeepSeek за 1 млн токенов (вход без кэша, выход), пиковый тариф на 27.10.2026, — оценка сверху:
 # вне пика вдвое дешевле, попадания в кэш промптов — почти бесплатны.
 PRICE_PER_MILLION = (0.30, 1.20)
@@ -75,7 +76,7 @@ def eligible(token_counts: Sequence[int], min_tokens: int = MIN_TOKENS) -> list[
     return [i for i, n in enumerate(token_counts) if n >= min_tokens]
 
 
-def complete_all(chat: CachedChat, requests: Sequence[ChatRequest], workers: int = 16) -> list[ChatResponse]:
+def complete_all(chat: CachedChat, requests: Sequence[ChatRequest], workers: int = LLM_WORKERS) -> list[ChatResponse]:
     """Ответы в порядке `requests`. Одинаковые запросы (повторяющийся текст чанка) отправляются один раз:
     это дешевле и исключает одновременную запись одного файла кэша несколькими потоками."""
     unique = {request.key(): request for request in requests}
