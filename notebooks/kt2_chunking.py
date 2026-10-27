@@ -417,263 +417,6 @@ parent_per_q[parent_per_q["split"] == "validation"].groupby(["config", "retrieve
     "tokens@5"].mean().unstack("retriever").round(0)
 
 # %% [markdown]
-# ## 5. Parent/child (ParentDocumentRetriever)
-#
-# Родитель — RecursiveChunker(P) по документу: крупный связный кусок, который отдаётся генератору.
-# Дети — TokenChunker(C) внутри каждого родителя: мелкие куски с точным эмбеддингом, которые индексируются.
-# Поиск идёт по детям, а score родителя — лучший score его детей (`gigarag.search`), выдаются родители.
-# Плотный поисковик — BGE-M3, как требует задание; BM25 — для сравнения.
-# P = 512 с детьми 128 — контроль: родители совпадают с лучшим простым чанкером, меняется только индекс.
-
-# %%
-from gigarag.chunking import child_chunks
-from gigarag.experiment import Entries
-
-BEST_SIMPLE = ChunkerSpec("recursive")
-best_chunks, best_result = chunker_runs[BEST_SIMPLE.label][:2]
-PARENT_CHILD = ((512, 128), (1024, 128), (1024, 256), (2048, 256))
-parent_rows, parent_results = [], {}
-for parent_size, child_size in PARENT_CHILD:
-    parent_spec = ChunkerSpec("recursive", chunk_size=parent_size)
-    child_spec = ChunkerSpec("token", chunk_size=child_size)
-    parents, parent_tokens, parent_seconds = bench.chunks(clean.docs, parent_spec.params(),
-                                                          lambda s=parent_spec: build_chunker(s, resources))
-    children, owners = child_chunks(parents, build_chunker(child_spec, resources))
-    label = f"parent {parent_size} / child {child_size}"
-    entries = Entries([c.text for c in children], owners)
-    parent_results[label] = bench.run(label, parents, clean.aliases, entries=entries)
-    parent_rows.append({"config": label, "родителей": len(parents), "детей": len(children),
-                        "токенов в родителе": parent_tokens.mean(), "BM25, с": parent_results[label].seconds["bm25"],
-                        "эмбеддинг детей, с": parent_results[label].seconds["dense"]})
-parent_per_q = pd.concat([best_result.per_question, *(r.per_question for r in parent_results.values())])
-display(pd.DataFrame(parent_rows).set_index("config").round(1))
-metrics.comparison_table(parent_per_q)
-
-# %% [markdown]
-# Где parent/child выигрывает у лучшего простого чанкера — по типам вопросов (validation, R@5, dense):
-
-# %%
-parent_by_type = metrics.comparison_table(parent_per_q, columns=["R@5", "Hit@5"], by=["config", "qtype"])
-parent_by_type["dense"].unstack("qtype").round(1)
-
-# %% [markdown]
-# ## 6. Метаданные
-#
-# Извлекаются для чанков лучшего простого чанкера (`gigarag.metadata.chunk_metadata`):
-#
-# - **структурные** — дата, источник, патч (у постов Telegram — патч, действовавший на дату поста),
-#   длина документа в токенах, позиция чанка (номер и относительная);
-# - **контентные** — тип (патчноут / статья / комментарий / пост / офтоп), язык по доле латиницы
-#   (ru / mixed / en), топ-5 ключевых слов TF-IDF;
-# - **качественные** — шумовой score: доля неалфавитных токенов BGE-M3 (числа, знаки, эмодзи, разметка).
-
-# %%
-from gigarag import metadata
-from gigarag.tokens import token_counts
-
-doc_tokens = dict(zip([d.doc_id for d in clean.docs], token_counts(tokenizer, [d.text for d in clean.docs]),
-                      strict=True))
-META_CODE = code_fingerprint(gigarag.patterns, gigarag.noise, metadata)
-meta = load_or_compute(
-    cache.path("chunk_meta", "parquet", chunks=docs_fingerprint(clean.docs), chunker=BEST_SIMPLE.label,
-               code=META_CODE, tokenizer=BGE_M3_REV),
-    lambda: metadata.chunk_metadata(best_chunks, clean.docs, doc_tokens, offsets),
-    load=read_parquet, save=write_parquet,
-)
-assert list(meta["chunk_id"]) == [c.chunk_id for c in best_chunks]
-meta.sample(6, random_state=42)[["chunk_id", "date", "patch", "content_type", "language", "doc_tokens",
-                                 "position", "noise_score", "keywords"]]
-
-# %%
-fig, axes = plt.subplots(1, 3, figsize=(15, 3.6))
-pd.crosstab(meta["content_type"], meta["language"]).plot(kind="bar", stacked=True, ax=axes[0], title="язык по типу")
-meta.boxplot(column="noise_score", by="content_type", ax=axes[1], rot=30)
-axes[1].set_title("шумовой score по типу")
-meta["patch"].value_counts().sort_index().plot(kind="bar", ax=axes[2], title="чанков на патч", fontsize=6)
-plt.suptitle("")
-plt.tight_layout()
-
-# %% [markdown]
-# ### 6.1. Фильтрация по метаданным
-#
-# Три фильтра, применяются до топ-k:
-#
-# - **патч из запроса** — если вопрос называет патч, остаются чанки этого патча или упоминающие его;
-#   к вопросам без номера патча фильтр не применяется;
-# - **без офтопа** — убираются нетематические посты Telegram (20% постов, взятых в корпус как шум);
-# - **шумовой score ≤ 0,5** — убираются чанки, где больше половины токенов не слова.
-#
-# Precision и полнота считаются до и после **на тех вопросах, к которым фильтр применим**.
-
-# %%
-best_texts = [c.text for c in best_chunks]
-filters = {
-    "патч из запроса": metadata.patch_filter(meta, best_texts),
-    "без офтопа": metadata.drop_types_filter(frozenset({metadata.OFFTOPIC})),
-    "шум ≤ 0,5": metadata.max_noise_filter(0.5),
-}
-filter_rows, filter_results = [], {}
-for name, chunk_filter in filters.items():
-    masks = metadata.filter_masks(chunk_filter, meta, bench.queries)
-    filter_results[name] = bench.run(f"фильтр: {name}", best_chunks, clean.aliases, masks=masks)
-    applicable = set(masks)
-    before = best_result.per_question[best_result.per_question["qid"].isin(applicable)].assign(config="без фильтра")
-    after = filter_results[name].per_question[filter_results[name].per_question["qid"].isin(applicable)]
-    table = metrics.comparison_table(pd.concat([before, after]), columns=["P@5", "Hit@5", "R@5", "MRR"])
-    kept = np.mean([m.mean() for m in masks.values()]) * 100
-    filter_rows.append(table.assign(**{"вопросов": len(applicable & set(before["qid"])), "оставлено чанков, %": kept}))
-pd.concat(filter_rows).round(1)
-
-# %% [markdown]
-# ### 6.2. Prepend: метаданные в тексте чанка
-#
-# Перед индексацией к чанку приписывается строка «заголовок документа | тип | патч | дата». Она даёт
-# то, чего часто нет в самом чанке: комментарий не называет патч, кусок статьи — свою тему.
-# Релевантность считается по исходному чанку, меняется только индексируемый текст.
-
-# %%
-prefixed = [metadata.with_metadata_prefix(c.text, row) for c, row in zip(best_chunks, meta.to_dict("records"),
-                                                                        strict=True)]
-print(prefixed[next(i for i, c in enumerate(best_chunks) if c.doc_id.startswith("dota2ru:comment"))][:300])
-prepend_result = bench.run("prepend метаданных", best_chunks, clean.aliases, entries=Entries(prefixed,
-                                                                                            list(range(len(prefixed)))))
-prepend_per_q = pd.concat([best_result.per_question, prepend_result.per_question])
-display(metrics.comparison_table(prepend_per_q, columns=metrics.METRIC_COLUMNS))
-display(metrics.paired_changes(prepend_per_q, BEST_SIMPLE.label, "prepend метаданных"))
-metrics.comparison_table(prepend_per_q, columns=["R@5"], by=["config", "qtype"]).droplevel(1, axis=1).unstack("qtype")
-
-# %% [markdown]
-# ## 7. LLM-обработка чанков
-#
-# Модель `gpt-4.1-mini-2025-04-14`, t = 0, seed 42, один чанк — один запрос (`gigarag.enrich`, промпты там же).
-# Чанки короче 30 токенов не отправляются: резюме реплики «+1» ничего не даёт, а стоит запроса.
-# Они индексируются своим текстом в обоих вариантах.
-#
-# - **Резюме вместо текста** — индексируется пересказ в 1–3 предложения.
-# - **Вопросы вместо текста** (HyDE-style) — три вопроса, на которые отвечает чанк, каждый отдельной записью;
-#   score чанка — лучший из его вопросов.
-# - Дополнительно — **текст + вопросы**: вопросы добавляются к исходному тексту, а не заменяют его.
-#
-# Релевантность по-прежнему считается по исходному тексту чанка: меняется только то, по чему чанк находят.
-
-# %%
-from gigarag import enrich
-from gigarag.cache import load_or_compute_timed, read_json, write_json
-from gigarag.llm import CachedChat, OpenAIChat
-
-chat = CachedChat(OpenAIChat.from_env(ROOT / ".env"), DATA / "llm_cache")
-best_tokens = chunker_runs[BEST_SIMPLE.label][2]["mean"]  # для итоговой таблицы
-eligible = enrich.eligible(token_counts(tokenizer, best_texts))
-print(f"в LLM: {len(eligible)} чанков из {len(best_chunks)} ({len(eligible) / len(best_chunks):.0%})")
-
-
-def llm_outputs(kind: str, make_request) -> tuple[list[dict], float]:
-    """Ответы LLM на все отобранные чанки (текст и расход токенов) и время первого прогона."""
-    def compute():
-        responses = enrich.complete_all(chat, [make_request(best_texts[i]) for i in eligible])
-        return [{"content": r.content, "prompt_tokens": r.prompt_tokens, "completion_tokens": r.completion_tokens}
-                for r in responses]
-    return load_or_compute_timed(
-        cache.path(f"llm_{kind}", "json", chunks=docs_fingerprint(clean.docs), chunker=BEST_SIMPLE.label,
-                   model=enrich.MODEL, prompt=enrich.PROMPT_VERSION, min_tokens=enrich.MIN_TOKENS),
-        compute, load=read_json, save=write_json)
-
-
-summaries, summary_seconds = llm_outputs("summary", enrich.summary_request)
-questions, question_seconds = llm_outputs("questions", enrich.questions_request)
-llm_cost = pd.DataFrame([
-    {"обработка": kind, "запросов": len(out), "токенов на входе": sum(o["prompt_tokens"] for o in out),
-     "токенов на выходе": sum(o["completion_tokens"] for o in out),
-     "стоимость, $": enrich.Usage(len(out), sum(o["prompt_tokens"] for o in out),
-                                  sum(o["completion_tokens"] for o in out), 0).cost_usd,
-     "время, мин": seconds / 60}
-    for kind, out, seconds in [("резюме", summaries, summary_seconds), ("вопросы", questions, question_seconds)]
-]).set_index("обработка").round(2)
-llm_cost
-
-# %%
-summary_texts = list(best_texts)
-for i, out in zip(eligible, summaries, strict=True):
-    summary_texts[i] = out["content"]
-chunk_questions = {i: enrich.parse_questions(out["content"]) for i, out in zip(eligible, questions, strict=True)}
-question_entries = [(q, i) for i in range(len(best_chunks)) for q in chunk_questions.get(i) or [best_texts[i]]]
-text_and_questions = [(t, i) for i, t in enumerate(best_texts)] + [(q, i) for i, qs in chunk_questions.items()
-                                                                  for q in qs]
-example = eligible[len(eligible) // 2]
-print("ЧАНК:", best_texts[example][:400], "\nРЕЗЮМЕ:", summary_texts[example], "\nВОПРОСЫ:", chunk_questions[example])
-
-llm_results = {
-    "резюме вместо текста": bench.run("резюме вместо текста", best_chunks, clean.aliases,
-                                      entries=Entries(summary_texts, list(range(len(best_chunks))))),
-    "вопросы вместо текста": bench.run("вопросы вместо текста", best_chunks, clean.aliases,
-                                       entries=Entries(*map(list, zip(*question_entries, strict=True)))),
-    "текст + вопросы": bench.run("текст + вопросы", best_chunks, clean.aliases,
-                                 entries=Entries(*map(list, zip(*text_and_questions, strict=True)))),
-}
-llm_per_q = pd.concat([best_result.per_question, *(r.per_question for r in llm_results.values())])
-metrics.comparison_table(llm_per_q, columns=metrics.METRIC_COLUMNS)
-
-# %% [markdown]
-# По типам вопросов (validation, R@5) — проверка гипотезы «резюме хуже на фактических, лучше на абстрактных»:
-
-# %%
-metrics.comparison_table(llm_per_q, columns=["R@5"], by=["config", "qtype"]).droplevel(1, axis=1).unstack("qtype")
-
-# %%
-pd.concat({name: metrics.paired_changes(llm_per_q, BEST_SIMPLE.label, name) for name in llm_results}, names=["вариант"])
-
-# %% [markdown]
-# ## 8. Итоговая таблица
-#
-# Строка — конфигурация: предобработка + чанкер + метаданные + LLM-обработка. Метрики — validation и test
-# отдельно; test не участвовал ни в одном выборе. Время индексации — чанкинг (с подсчётом токенов) + BM25
-# + эмбеддинг BGE-M3 всех записей на RTX 5080 (+ LLM, если есть) — время первого расчёта, сохранённое в кэше.
-
-# %%
-def final_row(config, preprocessing, chunker, meta_used, llm, result, mean_tokens, extra_seconds=0.0):
-    return {"config": config, "предобработка": preprocessing, "чанкер": chunker, "метаданные": meta_used,
-            "LLM": llm, "per_q": result.per_question.assign(config=config), "токенов в чанке": mean_tokens,
-            "индексация, с": extra_seconds + result.seconds["bm25"] + result.seconds["dense"]}
-
-
-def mean_r5(table: pd.DataFrame, config: str) -> float:
-    """Средний R@5 двух поисковиков — критерий выбора внутри серии (validation)."""
-    return table.loc[config, [("bm25", "R@5"), ("dense", "R@5")]].mean()
-
-
-ablation_val = metrics.comparison_table(ablation_per_q)
-semantic_best = max(ablation_specs, key=lambda spec: mean_r5(ablation_val, spec.label))
-parent_val = metrics.comparison_table(parent_per_q)
-best_parent = max(parent_results, key=lambda name: mean_r5(parent_val, name))
-CLEANED = "все, кроме signatures"
-rows_final = [
-    final_row("baseline: сырой корпус", "нет", "token 512", "—", "—", baseline, raw_tokens.mean(), raw_chunk_seconds),
-    *[final_row(label, CLEANED, label, "—", "—", run[1], run[2]["mean"], run[2]["чанкинг, с"])
-      for label, run in chunker_runs.items()],
-    *[final_row(semantic_best.label, CLEANED, semantic_best.label, "—", "—", ablation_runs[semantic_best.label][2],
-                ablation_runs[semantic_best.label][3]["mean"], ablation_runs[semantic_best.label][3]["чанкинг, с"])
-      for _ in [semantic_best] if semantic_best.label not in chunker_runs],  # лучший порог, если он не в разделе 3
-    final_row(best_parent, CLEANED, best_parent, "—", "—", parent_results[best_parent],
-              pd.DataFrame(parent_rows).set_index("config").loc[best_parent, "токенов в родителе"]),
-    final_row("фильтр: патч из запроса", CLEANED, BEST_SIMPLE.label, "фильтр по патчу", "—",
-              filter_results["патч из запроса"], best_tokens),
-    final_row("prepend метаданных", CLEANED, BEST_SIMPLE.label, "prepend", "—", prepend_result, best_tokens),
-    final_row("резюме вместо текста", CLEANED, BEST_SIMPLE.label, "—", "резюме", llm_results["резюме вместо текста"],
-              best_tokens, summary_seconds),
-    final_row("вопросы вместо текста", CLEANED, BEST_SIMPLE.label, "—", "вопросы",
-              llm_results["вопросы вместо текста"], best_tokens, question_seconds),
-    final_row("текст + вопросы", CLEANED, BEST_SIMPLE.label, "—", "вопросы", llm_results["текст + вопросы"],
-              best_tokens, question_seconds),
-]
-final_per_q = pd.concat([r["per_q"] for r in rows_final])
-describe = pd.DataFrame([{k: v for k, v in r.items() if k != "per_q"} for r in rows_final]).set_index("config")
-final_tables = {split: metrics.comparison_table(final_per_q, split, columns=("Hit@5", "R@5", "MRR"))
-                for split in ("validation", "test")}
-final = describe.join(pd.concat(final_tables, axis=1).set_axis(
-    [f"{split} {r} {m}" for split, r, m in pd.concat(final_tables, axis=1).columns], axis=1)).round(1)
-final
-
-# %% [markdown]
 # ## 6. Метаданные
 #
 # Извлекаются для чанков лучшего простого чанкера (`gigarag.metadata.chunk_metadata`):
@@ -691,8 +434,8 @@ final
 import gigarag.metadata
 from gigarag import metadata
 
-doc_token_counts = dict(zip([d.doc_id for d in clean.docs], tokens.token_counts(tokenizer, [d.text for d in clean.docs]),
-                            strict=True))
+doc_token_counts = dict(zip([d.doc_id for d in clean.docs],
+                            tokens.token_counts(tokenizer, [d.text for d in clean.docs]), strict=True))
 meta = load_or_compute(
     cache.path("chunk_meta", "parquet", docs=docs_fingerprint(clean.docs), chunker=BEST.label,
                code=code_fingerprint(gigarag.metadata, gigarag.noise, gigarag.patterns), tokenizer=BGE_M3_REV),
@@ -765,7 +508,7 @@ metrics.comparison_table(prepend_per_q, columns=["R@5"], by=["config", "qtype"])
 # %% [markdown]
 # ## 7. LLM-обработка чанков
 #
-# Модель `gpt-4.1-mini-2025-04-14` (генератор, выбранный в КТ 1), t = 0, seed 42, по одному чанку на запрос,
+# Модель `deepseek-flash` (DeepSeek-V4.1-Flash, дешёвая массовая обработка), t = 0, по одному чанку на запрос,
 # промпты — `gigarag.enrich` (версия 1). Обрабатываются чанки от 30 токенов: резюме реплики «+1» или вопросы
 # к подписи из трёх слов ничего не дают. Короткие чанки в обоих вариантах индексируются своим текстом.
 #
@@ -782,7 +525,7 @@ from gigarag.cache import load_or_compute_timed, read_json, write_json
 from gigarag.experiment import texts_fingerprint
 from gigarag.llm import CachedChat, OpenAIChat
 
-chat = CachedChat(OpenAIChat.from_env(ROOT / ".env"), DATA / "llm_cache")
+chat = CachedChat(OpenAIChat.from_env(ROOT / ".env", enrich.PROVIDER, enrich.PROVIDER_BASE_URL), DATA / "llm_cache")
 llm_targets = enrich.eligible(best_tokens)
 print(f"в LLM идут {len(llm_targets)} чанков из {len(best_chunks)} ({len(llm_targets) / len(best_chunks):.0%})")
 ENRICH_CODE = code_fingerprint(gigarag.enrich)
@@ -819,7 +562,8 @@ chunk_questions = dict(zip(llm_targets, (enrich.parse_questions(r["content"]) fo
 question_pairs = [(q, i) for i, text in enumerate(best_texts) for q in chunk_questions.get(i) or [text]]
 question_entries = Entries([q for q, _ in question_pairs], [i for _, i in question_pairs])
 example = llm_targets[len(llm_targets) // 2]
-print("ЧАНК:", best_texts[example][:400], "\n\nРЕЗЮМЕ:", summary_text[example], "\n\nВОПРОСЫ:", chunk_questions[example])
+print("ЧАНК:", best_texts[example][:400], "\n\nРЕЗЮМЕ:", summary_text[example],
+      "\n\nВОПРОСЫ:", chunk_questions[example])
 
 # %%
 summary_run = bench.run("резюме вместо текста", best_chunks, clean.aliases, entries=summary_entries,
@@ -850,7 +594,8 @@ final_configs = [
      ablation_runs[best_semantic.label][3]["чанкинг, с"], None),
     ("вся чистка без signatures", chunker_specs[4].label, "—", "—", chunker_runs[chunker_specs[4].label][1],
      chunker_runs[chunker_specs[4].label][2]["чанкинг, с"], None),
-    ("вся чистка без signatures", best_parent, "—", "—", parent_runs[best_parent][2], None, parent_runs[best_parent][1]),
+    ("вся чистка без signatures", best_parent, "—", "—", parent_runs[best_parent][2], None,
+     parent_runs[best_parent][1]),
     ("вся чистка без signatures", BEST.label, "prepend", "—", prepend, best_stats["чанкинг, с"], best_tokens),
     ("вся чистка без signatures", BEST.label, "фильтр по патчу", "—", filter_runs["фильтр по патчу"],
      best_stats["чанкинг, с"], best_tokens),

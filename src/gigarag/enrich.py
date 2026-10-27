@@ -12,14 +12,19 @@ from dataclasses import dataclass
 from gigarag.llm import CachedChat, ChatRequest, ChatResponse, chat_request, parse_json_object
 from gigarag.parallel import parallel_map
 
-MODEL = "gpt-4.1-mini-2025-04-14"
+# DeepSeek-V4.1-Flash: обработка ~20 тыс. чанков — массовая дешёвая задача, качество пересказа здесь
+# важнее эрудиции модели. OpenAI-совместимый API, ключ — DEEPSEEK_API_KEY в .env.
+PROVIDER = "DEEPSEEK"
+PROVIDER_BASE_URL = "https://api.deepseek.com"
+MODEL = "deepseek-flash"
 TEMPERATURE = 0.0
 SEED = 42
 PROMPT_VERSION = 1
 MIN_TOKENS = 30
 QUESTIONS_PER_CHUNK = 3
-# Цены OpenAI за 1 млн токенов (вход, выход) для gpt-4.1-mini на момент запуска — для оценки стоимости.
-PRICE_PER_MILLION = (0.40, 1.60)
+# Цены DeepSeek за 1 млн токенов (вход без кэша, выход), пиковый тариф на 27.10.2026, — оценка сверху:
+# вне пика вдвое дешевле, попадания в кэш промптов — почти бесплатны.
+PRICE_PER_MILLION = (0.30, 1.20)
 
 SUMMARY_SYSTEM = f"""Ты помогаешь строить поисковый индекс по материалам о балансе Dota 2 (патчноуты, статьи,
 комментарии, посты Telegram). Перескажи фрагмент в 1–3 предложениях на русском. Сохрани главное: героев,

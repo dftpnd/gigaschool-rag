@@ -70,9 +70,12 @@ class OpenAIChat:
         self._client = httpx.Client(timeout=self.timeout, headers={"Authorization": f"Bearer {self.api_key}"})
 
     @classmethod
-    def from_env(cls, env_file: Path) -> "OpenAIChat":
+    def from_env(cls, env_file: Path, prefix: str = "OPENAI", base_url: str | None = None) -> "OpenAIChat":
+        """Ключ и адрес провайдера из переменных `<prefix>_API_KEY` и `<prefix>_BASE_URL`: любой
+        OpenAI-совместимый API (OpenAI, DeepSeek) подключается без отдельного клиента."""
         env = {**read_env_file(env_file), **os.environ}
-        return cls(api_key=env["OPENAI_API_KEY"], base_url=env.get("OPENAI_BASE_URL", cls.base_url))
+        return cls(api_key=env[f"{prefix}_API_KEY"],
+                   base_url=env.get(f"{prefix}_BASE_URL", base_url or cls.base_url))
 
     def complete(self, request: ChatRequest) -> ChatResponse:
         response = send_with_retries(
