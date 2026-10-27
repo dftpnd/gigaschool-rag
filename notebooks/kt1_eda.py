@@ -16,7 +16,7 @@
 # %% [markdown]
 # # КТ 1 — EDA сырого корпуса
 #
-# Корпус собран скриптом `scripts/build_corpus.py` (описание источников и решений — в `README.md`).
+# Корпус собран скриптом `scripts/build_corpus.py` (описание источников и решений — в `reports/kt1.md`).
 # Здесь он анализируется **до какой-либо чистки**: HTML-разметка, эмодзи, ссылки и дубликаты на месте.
 #
 # Вопросы, на которые отвечает EDA:
@@ -56,7 +56,8 @@ from gigarag.text import is_mostly_latin, visible_text
 pd.set_option("display.max_colwidth", 120)
 plt.rcParams["figure.dpi"] = 110
 
-DATA = Path.cwd() / "data"
+ROOT = Path.cwd().parent  # ноутбук исполняется из notebooks/
+DATA = ROOT / "data"
 rows, CORPUS_SHA = read_jsonl(DATA / "corpus.jsonl")
 cache = CacheStore(DATA / "cache", CORPUS_SHA)
 # Отпечатки кода, от которого зависят результаты: правка регулярок или формул сама меняет ключи кэшей.

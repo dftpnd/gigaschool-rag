@@ -7,10 +7,10 @@
 |---|---|---|
 | Сбор сырых данных | ✅ | `scripts/fetch_*.py` |
 | Сборка корпуса | ✅ | `scripts/build_corpus.py` → `data/corpus.jsonl` |
-| EDA | ✅ | `eda.ipynb` (исходник — `eda.py`) |
-| Золотой набор | ✅ | `scripts/build_gold.py` → `gold/gold.jsonl`, описание — `gold.ipynb` (исходник — `gold.py`) |
+| EDA | ✅ | `notebooks/kt1_eda.ipynb` (исходник — `kt1_eda.py`) |
+| Золотой набор | ✅ | `scripts/build_gold.py` → `gold/gold.jsonl`, описание — `notebooks/kt1_gold.ipynb` (исходник — `kt1_gold.py`) |
 | Разбиение validation/test | ✅ | поле `split` в `gold/gold.jsonl` |
-| Baseline LLM без RAG | ✅ | `scripts/baseline_no_rag.py` → `gold/baseline_no_rag.jsonl`, разбор — `gold.ipynb` |
+| Baseline LLM без RAG | ✅ | `scripts/baseline_no_rag.py` → `gold/baseline_no_rag.jsonl`, разбор — `notebooks/kt1_gold.ipynb` |
 
 ## Источники
 
@@ -37,31 +37,31 @@ uv sync
 На CPU единственный тяжёлый шаг — эмбеддинги для кластеризации (~21 тыс. коротких текстов): он займёт
 заметно дольше, чем на GPU (на RTX 5080 весь ноутбук исполняется меньше чем за минуту с холодным кэшем).
 
+Все команды — из корня репозитория.
+
 **Данные и корпус:**
 
 ```bash
-cd kt1-corpus-gold/scripts
-../../.venv/bin/python fetch_patches.py
-../../.venv/bin/python fetch_dota2ru.py
-../../.venv/bin/python fetch_telegram.py Dota2 gabenews --since 2022-01-01
-../../.venv/bin/python build_corpus.py   # печатает sha256 собранного корпуса
+uv run python scripts/fetch_patches.py
+uv run python scripts/fetch_dota2ru.py
+uv run python scripts/fetch_telegram.py Dota2 gabenews --since 2022-01-01
+uv run python scripts/build_corpus.py   # печатает sha256 собранного корпуса
 ```
 
-**EDA** — исполнить ноутбук из папки `kt1-corpus-gold` (исходник `eda.py` синхронизирован через jupytext):
+**EDA** — исполнить ноутбук (исходник `notebooks/kt1_eda.py` синхронизирован через jupytext):
 
 ```bash
-cd kt1-corpus-gold
-../.venv/bin/jupytext --to ipynb eda.py
-../.venv/bin/jupyter nbconvert --to notebook --execute --inplace eda.ipynb
+uv run jupytext --to ipynb notebooks/kt1_eda.py
+uv run jupyter nbconvert --to notebook --execute --inplace notebooks/kt1_eda.ipynb
 ```
 
 **Золотой набор и baseline** — стадии по очереди (нужен `OPENAI_API_KEY` в `.env` в корне), затем ноутбук:
 
 ```bash
-cd kt1-corpus-gold/scripts
-for stage in generate stylize label review finalize; do ../../.venv/bin/python build_gold.py $stage; done
-../../.venv/bin/python baseline_no_rag.py
-cd .. && ../.venv/bin/jupytext --to ipynb gold.py && ../.venv/bin/jupyter nbconvert --to notebook --execute --inplace gold.ipynb
+for stage in generate stylize label review finalize; do uv run python scripts/build_gold.py $stage; done
+uv run python scripts/baseline_no_rag.py
+uv run jupytext --to ipynb notebooks/kt1_gold.py
+uv run jupyter nbconvert --to notebook --execute --inplace notebooks/kt1_gold.ipynb
 ```
 
 Ответы LLM кэшируются в `data/llm_cache/` по полному запросу (модель, промпты, температура, seed):
@@ -99,7 +99,7 @@ cd .. && ../.venv/bin/jupytext --to ipynb gold.py && ../.venv/bin/jupyter nbconv
 | `build_gold.py` | золотой набор по стадиям: генерация, стилизация, разметка, ревью, финализация | `gigarag.gold`, `.passages`, `.retrieval`, `.llm` |
 | `gold_seeds.py`, `gold_prompts.py` | отбор документов-затравок; промпты и параметры LLM | `gigarag.patterns` |
 | `baseline_no_rag.py` | ответы LLM без контекста и их оценка судьёй | `gigarag.answer_eval`, `.llm` |
-| `settings.py` | пути и параметры КТ 1 | — |
+| `settings.py` | пути и параметры всех КТ | — |
 
 Разбор каждого источника — чистые функции «HTML/JSON → `Document`» (`gigarag.sources.patchnotes`,
 `.dota2ru`, `.telegram`), покрытые тестами в `tests/test_sources.py`. Вычисления EDA (классы токенов,
@@ -146,7 +146,7 @@ cd .. && ../.venv/bin/jupytext --to ipynb gold.py && ../.venv/bin/jupyter nbconv
 
 ## EDA — коротко
 
-Подробно — в `eda.ipynb`, раздел «Выводы».
+Подробно — в `notebooks/kt1_eda.ipynb`, раздел «Выводы».
 
 Видимый текст — сырой текст без тегов и с декодированными HTML-сущностями (`&nbsp;` → пробел).
 
@@ -167,7 +167,7 @@ cd .. && ../.venv/bin/jupytext --to ipynb gold.py && ../.venv/bin/jupyter nbconv
 ## Золотой набор
 
 50 вопросов в `gold/gold.jsonl`: 15 фактических, 15 составных, 10 абстрактных, 10 негативных.
-Подробности, таблицы и графики — в `gold.ipynb`.
+Подробности, таблицы и графики — в `notebooks/kt1_gold.ipynb`.
 
 Формат строки: `qid`, `qtype`, `question`, `answer`, `evidence` (список `passage_id`, `doc_id`, `grade`,
 `quote`), `split`, `styles`, `original_question` (формулировка до стилизации), `seed_docs`.
@@ -245,7 +245,7 @@ cd .. && ../.venv/bin/jupytext --to ipynb gold.py && ../.venv/bin/jupyter nbconv
 
 ### Отклонённые вопросы
 
-Из 74 кандидатов принято 50, 12 в резерве сверх квоты, 12 отклонено. Все причины — в `gold.ipynb`
+Из 74 кандидатов принято 50, 12 в резерве сверх квоты, 12 отклонено. Все причины — в `notebooks/kt1_gold.ipynb`
 и `gold/review.json`; характерные примеры:
 
 | Кандидат | Вопрос | Причина |

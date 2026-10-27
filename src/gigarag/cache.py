@@ -3,6 +3,7 @@
 import hashlib
 import inspect
 import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -76,3 +77,23 @@ def read_json(path: Path):
 
 def write_json(value, path: Path) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+
+
+def timed[T](compute: Callable[[], T]) -> tuple[T, float]:
+    """Значение и время его расчёта в секундах."""
+    start = time.perf_counter()
+    value = compute()
+    return value, time.perf_counter() - start
+
+
+def load_or_compute_timed[T](path: Path, compute: Callable[[], T], *, load: Callable[[Path], T],
+                             save: Callable[[T, Path], None]) -> tuple[T, float]:
+    """Как `load_or_compute`, но вместе со временем исходного расчёта: оно сохраняется рядом
+    (`<имя>.seconds.json`), поэтому повторный прогон из кэша сообщает реальное время, а не время чтения."""
+    seconds_path = path.with_name(f"{path.stem}.seconds.json")
+    if path.exists() and seconds_path.exists():
+        return load(path), read_json(seconds_path)
+    value, seconds = timed(compute)
+    atomic_save(save, value, path)
+    atomic_save(write_json, seconds, seconds_path)
+    return value, seconds

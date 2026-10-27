@@ -2,8 +2,9 @@
 name = "gigaschool-rag"
 version = "0.1.0"
 description = "Сквозной RAG-проект курса LLM-инженер (GigaSchool)"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.15"  # torch: колёса есть для 3.12–3.14
 dependencies = [
+    "chonkie[neural,semantic,st]==1.7.0",
     "datasketch>=2.0.0",
     "emoji>=2.16.0",
     "httpx>=0.27",
@@ -42,9 +43,8 @@ ignore = ["RUF001", "RUF002", "RUF003"]  # кириллица в строках 
 
 [tool.ruff.lint.per-file-ignores]
 # Ноутбуки: импорты внутри ячеек, встроенный display и выражение в конце ячейки как её вывод.
-"kt*/*.py" = ["E402", "B018"]
+"notebooks/*.py" = ["E402", "B018", "F821"]  # display — встроенная функция Jupyter
 "*.ipynb" = ["E402", "B018", "F821"]
-"kt*/eda.py" = ["E402", "B018", "F821"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["gigarag", "settings"]

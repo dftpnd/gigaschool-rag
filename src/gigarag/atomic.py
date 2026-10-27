@@ -1,13 +1,16 @@
 """Атомарная запись файлов: прерванная запись не оставляет повреждённого файла на итоговом пути."""
 
 import os
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 
 
 def temp_path(path: Path) -> Path:
-    """Временный файл рядом с итоговым, с тем же расширением (np.save сам дописывает .npy без него)."""
-    return path.with_name(f".{path.stem}.tmp{path.suffix}")
+    """Временный файл рядом с итоговым, с тем же расширением (np.save сам дописывает .npy без него).
+    Имя уникально: параллельные записи одного пути (два потока с одинаковым запросом к LLM)
+    не делят временный файл, и последний `os.replace` просто побеждает."""
+    return path.with_name(f".{path.stem}.{uuid.uuid4().hex}.tmp{path.suffix}")
 
 
 def atomic_save[T](save: Callable[[T, Path], None], value: T, path: Path) -> None:

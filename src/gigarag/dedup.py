@@ -76,5 +76,25 @@ def confirmed_pairs(pairs: Iterable[Pair], shingles: Mapping[str, frozenset[str]
     return [p for p in scored if p[2] >= threshold]
 
 
+def connected_components(pairs: Iterable[Pair]) -> list[list[str]]:
+    """Группы документов, связанных парами (транзитивно), — каждая отсортирована, группы по первому элементу."""
+    parent: dict[str, str] = {}
+
+    def root(x: str) -> str:
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for a, b in pairs:
+        ra, rb = root(a), root(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+    groups: dict[str, list[str]] = {}
+    for x in sorted(parent):
+        groups.setdefault(root(x), []).append(x)
+    return sorted(groups.values())
+
+
 def _ordered(a: str, b: str) -> Pair:
     return (a, b) if a <= b else (b, a)

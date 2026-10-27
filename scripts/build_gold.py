@@ -14,7 +14,6 @@ import json
 import random
 from collections import Counter
 from dataclasses import asdict, replace
-from pathlib import Path
 
 import gold_prompts as P
 import numpy as np
@@ -35,11 +34,9 @@ from gigarag.passages import Passage, corpus_passages, passages_fingerprint
 from gigarag.patterns import patch_mentions, word_tokens
 from gigarag.retrieval import Bm25Index, dense_search, union_ids
 from gigarag.text import contains_quote, unsupported_words, visible_text
-from settings import CORPUS, DATA, SEED
+from settings import CACHE, CORPUS, DATA, ENV_FILE, GOLD_DIR, LLM_CACHE, SEED
 
-ROOT = Path(__file__).resolve().parents[2]
 WORK = DATA / "gold"
-GOLD_DIR = Path(__file__).resolve().parent.parent / "gold"
 REVIEW_FILE = GOLD_DIR / "review.json"
 
 QUOTAS = {"factual": 15, "composite": 15, "abstract": 10, "negative": 10}
@@ -67,7 +64,7 @@ def load_corpus() -> tuple[dict[str, dict], str]:
 
 
 def llm() -> CachedChat:
-    return CachedChat(OpenAIChat.from_env(ROOT / ".env"), DATA / "llm_cache")
+    return CachedChat(OpenAIChat.from_env(ENV_FILE), LLM_CACHE)
 
 
 def write_stage(name: str, records: list[dict]) -> None:
@@ -161,7 +158,7 @@ def passage_embeddings(passages: list[Passage]) -> dict[str, np.ndarray]:
     """Эмбеддинги отрывков по моделям. Кэш привязан к отпечатку упорядоченных отрывков и коду
     нарезки и кодирования; размер загруженной матрицы сверяется с числом отрывков."""
     texts = [p.text for p in passages]
-    cache = CacheStore(DATA / "cache", passages_fingerprint(passages))
+    cache = CacheStore(CACHE, passages_fingerprint(passages))
 
     def embed(model: str, rev: str, prefix: str, batch: int) -> np.ndarray:
         vectors = load_or_compute(
