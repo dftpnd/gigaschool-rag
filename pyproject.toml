@@ -42,9 +42,9 @@ ignore = ["RUF001", "RUF002", "RUF003"]  # кириллица в строках 
 
 [tool.ruff.lint.per-file-ignores]
 # Ноутбуки: импорты внутри ячеек, встроенный display и выражение в конце ячейки как её вывод.
-"kt*/*.py" = ["E402", "B018"]
+"notebooks/*.py" = ["E402", "B018"]
 "*.ipynb" = ["E402", "B018", "F821"]
-"kt*/eda.py" = ["E402", "B018", "F821"]
+"notebooks/kt1_eda.py" = ["E402", "B018", "F821"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["gigarag", "settings"]

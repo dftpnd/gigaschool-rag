@@ -17,7 +17,7 @@
 # # КТ 1 — золотой набор и baseline без RAG
 #
 # Набор построен скриптом `scripts/build_gold.py` (стадии generate → stylize → label → review → finalize),
-# baseline — скриптом `scripts/baseline_no_rag.py`. Методика описана в `README.md`; здесь — результат:
+# baseline — скриптом `scripts/baseline_no_rag.py`. Методика описана в `reports/kt1.md`; здесь — результат:
 # 1. Состав набора и баланс разбиения validation/test.
 # 2. Лексическое разнообразие формулировок.
 # 3. Покрытие корпуса: источники, патчи, число релевантных документов на вопрос.
@@ -39,8 +39,9 @@ from gigarag.gold import QUESTION_TYPES, load_gold
 pd.set_option("display.max_colwidth", 160)
 plt.rcParams["figure.dpi"] = 110
 
-DATA = Path.cwd() / "data"
-GOLD = Path.cwd() / "gold"
+ROOT = Path.cwd().parent  # ноутбук исполняется из notebooks/
+DATA = ROOT / "data"
+GOLD = ROOT / "gold"
 rows, CORPUS_SHA = read_jsonl(DATA / "corpus.jsonl")
 sources = {r["doc_id"]: r["source"] for r in rows}
 patches = {r["doc_id"]: r["patch"] for r in rows}
