@@ -256,18 +256,18 @@ by_type = metrics.comparison_table(chunker_per_q, columns=["R@5"], by=["config",
 by_type.droplevel(1, axis=1).unstack("qtype")
 
 # %% [markdown]
-# **SentenceChunker на постах без знаков препинания.** Пост короче 512 токенов любой чанкер оставляет
-# целым, поэтому разница видна только на длинных. Длинный пост без точек режется только по переводам строк.
-# Если и их нет, предложение одно и упаковывать нечего: чанк обрезается по пределу токенов, как у Token.
+# **SentenceChunker на постах без знаков препинания.** Пост короче предела любой чанкер оставляет целым,
+# поэтому важны только длинные посты. Сколько постов Telegram вообще без конца предложения
+# (`.`, `!`, `?`, `…`) и сколько из них длиннее 512 токенов — только их SentenceChunker мог бы порезать иначе:
 
 # %%
-sentence_chunks = chunker_runs[ChunkerSpec("sentence").label][0]
-by_doc = pd.Series([c.doc_id for c in sentence_chunks]).value_counts()
-unpunctuated = [d for d in clean.docs if d.source.startswith("tg_") and by_doc.get(d.doc_id, 0) > 1
-                and gigarag.patterns.sentences(d.text.replace("\n", " ")).__len__() <= 2]
-print("длинных постов Telegram с ≤ 2 предложениями:", len(unpunctuated))
-pd.DataFrame([{"chunk_id": c.chunk_id, "начало": c.text[:90], "конец": c.text[-60:]}
-              for c in sentence_chunks if unpunctuated and c.doc_id == unpunctuated[0].doc_id])
+telegram = [d for d in clean.docs if d.source.startswith("tg_")]
+telegram_tokens = dict(zip([d.doc_id for d in telegram], tokens.token_counts(tokenizer, [d.text for d in telegram]),
+                           strict=True))
+no_sentence_end = [d for d in telegram if len(gigarag.patterns.sentences(d.text.replace("\n", " "))) == 1]
+pd.Series({"постов Telegram": len(telegram), "без конца предложения": len(no_sentence_end),
+           "из них длиннее 512 токенов": sum(telegram_tokens[d.doc_id] > 512 for d in no_sentence_end),
+           "из них с переводами строк": sum("\n" in d.text for d in no_sentence_end)})
 
 # %% [markdown]
 # ## 4. Ablation семантического чанкинга
@@ -484,7 +484,8 @@ for name, chunk_filter in filters.items():
     after = filtered.per_question[filtered.per_question["qid"].isin(masks)]
     table = metrics.comparison_table(pd.concat([before, after]), columns=["P@5", "R@5", "Hit@5", "MRR"])
     table.index = pd.MultiIndex.from_tuples([(name, cfg) for cfg in table.index], names=["фильтр", "выдача"])
-    filter_rows.append(table.assign(вопросов=before.query("split == 'validation'")["qid"].nunique()))
+    table[("вопросов", "")] = before.query("split == 'validation'")["qid"].nunique()
+    filter_rows.append(table)
 pd.concat(filter_rows)
 
 # %% [markdown]
@@ -517,6 +518,10 @@ metrics.comparison_table(prepend_per_q, columns=["R@5"], by=["config", "qtype"])
 #   из его вопросов.
 #
 # Выдаётся и оценивается исходный чанк: релевантность — по цитате в его тексте.
+#
+# Стоимость — по пиковому тарифу DeepSeek (оценка сверху, вне пика вдвое дешевле). `deepseek-flash` —
+# рассуждающая модель: выходные токены включают рассуждения, поэтому их больше, чем самого текста ответа.
+# Время — первый прогон в 32 потока.
 
 # %%
 import gigarag.enrich
@@ -584,39 +589,52 @@ metrics.comparison_table(llm_per_q, columns=["R@5"], by=["config", "qtype"]).dro
 # ## 8. Итоговая таблица
 #
 # Строка — конфигурация «предобработка + чанкер + метаданные + LLM». Validation и test — отдельно;
-# test не участвовал ни в одном выборе. Время индексирования — чанкинг + эмбеддинг записей BGE-M3
-# (+ LLM-обработка, где она есть), с. BM25 строится за доли секунды и в сумму не входит.
+# test не участвовал ни в одном выборе. Лучший порог семантического чанкинга и лучшая пара parent/child
+# выбираются здесь же по validation (средний R@5 двух поисковиков). Время индексирования, с — чанкинг
+# с подсчётом токенов + построение BM25 + эмбеддинг всех записей BGE-M3 на RTX 5080 (+ LLM-обработка, где она есть).
 
 # %%
-best_semantic = ChunkerSpec("semantic", threshold=0.1, embedder=E5_SMALL)
-best_parent = "parent 1024 / child 128"
-final_configs = [
-    ("сырой корпус", "token(512)", "—", "—", baseline, raw_chunk_seconds, raw_tokens),
-    ("вся чистка без signatures", "token(512)", "—", "—", control, None, None),
-    ("вся чистка без signatures", BEST.label, "—", "—", best_result, best_stats["чанкинг, с"], best_tokens),
-    ("вся чистка без signatures", best_semantic.label, "—", "—", ablation_runs[best_semantic.label][2],
-     ablation_runs[best_semantic.label][3]["чанкинг, с"], None),
-    ("вся чистка без signatures", chunker_specs[4].label, "—", "—", chunker_runs[chunker_specs[4].label][1],
-     chunker_runs[chunker_specs[4].label][2]["чанкинг, с"], None),
-    ("вся чистка без signatures", best_parent, "—", "—", parent_runs[best_parent][2], None,
-     parent_runs[best_parent][1]),
-    ("вся чистка без signatures", BEST.label, "prepend", "—", prepend, best_stats["чанкинг, с"], best_tokens),
-    ("вся чистка без signatures", BEST.label, "фильтр по патчу", "—", filter_runs["фильтр по патчу"],
-     best_stats["чанкинг, с"], best_tokens),
-    ("вся чистка без signatures", BEST.label, "—", "резюме", summary_run, best_stats["чанкинг, с"] + summary_seconds,
-     best_tokens),
-    ("вся чистка без signatures", BEST.label, "—", "вопросы", questions_run,
-     best_stats["чанкинг, с"] + questions_seconds, best_tokens),
+def mean_r5(per_q: pd.DataFrame, config: str) -> float:
+    """Критерий выбора внутри серии: средний R@5 двух поисковиков на validation."""
+    subset = per_q[(per_q["split"] == "validation") & (per_q["config"] == config)]
+    return subset.groupby("retriever")["R@5"].mean().mean()
+
+
+best_semantic = max(ablation_specs, key=lambda spec: mean_r5(ablation_per_q, spec.label))
+best_parent = max(parent_runs, key=lambda config: mean_r5(parent_per_q, config))
+print("лучший порог семантического:", best_semantic.label, "| лучший parent/child:", best_parent)
+
+CLEANED = "все шаги, кроме signatures"
+parent_info = pd.DataFrame(parent_stats).set_index("config").loc[best_parent]
+token_stats, sdpm_spec = chunker_runs[TOKEN_512.label][2], chunker_specs[4]
+semantic_stats, sdpm_stats = ablation_runs[best_semantic.label][3], chunker_runs[sdpm_spec.label][2]
+final_configs = [  # (предобработка, чанкер, метаданные, LLM, прогон, средний размер чанка, время подготовки чанков, с)
+    ("нет", TOKEN_512.label, "—", "—", baseline, raw_tokens.mean(), raw_chunk_seconds),
+    (CLEANED, TOKEN_512.label, "—", "—", chunker_runs[TOKEN_512.label][1], token_stats["mean"],
+     token_stats["чанкинг, с"]),
+    (CLEANED, BEST.label, "—", "—", best_result, best_stats["mean"], best_stats["чанкинг, с"]),
+    (CLEANED, best_semantic.label, "—", "—", ablation_runs[best_semantic.label][2], semantic_stats["mean"],
+     semantic_stats["чанкинг, с"]),
+    (CLEANED, sdpm_spec.label, "—", "—", chunker_runs[sdpm_spec.label][1], sdpm_stats["mean"],
+     sdpm_stats["чанкинг, с"]),
+    (CLEANED, best_parent, "—", "—", parent_runs[best_parent][2], parent_info["токенов в родителе"],
+     parent_info["чанкинг, с"]),
+    (CLEANED, BEST.label, "prepend", "—", prepend, best_stats["mean"], best_stats["чанкинг, с"]),
+    (CLEANED, BEST.label, "фильтр по патчу", "—", filter_runs["фильтр по патчу"], best_stats["mean"],
+     best_stats["чанкинг, с"]),
+    (CLEANED, BEST.label, "—", "резюме", summary_run, best_stats["mean"], best_stats["чанкинг, с"] + summary_seconds),
+    (CLEANED, BEST.label, "—", "вопросы", questions_run, best_stats["mean"],
+     best_stats["чанкинг, с"] + questions_seconds),
 ]
 final_rows = []
-for preprocessing, chunker, meta_use, llm_use, run, chunk_seconds, chunk_tokens_ in final_configs:
-    per_q = run.per_question
+for preprocessing, chunker, meta_use, llm_use, run, mean_tokens, prepare_seconds in final_configs:
     row = {"предобработка": preprocessing, "чанкер": chunker, "метаданные": meta_use, "LLM": llm_use}
     for split in ("validation", "test"):
-        means = per_q[per_q["split"] == split].groupby("retriever")[["Hit@5", "R@5", "MRR"]].mean() * 100
-        row |= {f"{split[:4]} {r} {m}": means.loc[r, m] for r in ("bm25", "dense") for m in ("Hit@5", "R@5")}
-    row["токенов в чанке"] = float(np.mean(chunk_tokens_)) if chunk_tokens_ is not None else np.nan
-    row["индексирование, с"] = (chunk_seconds or 0) + run.seconds["dense"] if chunk_seconds is not None else np.nan
+        subset = run.per_question[run.per_question["split"] == split]
+        means = subset.groupby("retriever")[["Hit@5", "R@5", "MRR"]].mean() * 100
+        row |= {f"{split} {r} {m}": means.loc[r, m] for r in ("bm25", "dense") for m in ("Hit@5", "R@5", "MRR")}
+    row["токенов в чанке"] = mean_tokens
+    row["индексирование, с"] = prepare_seconds + run.seconds["bm25"] + run.seconds["dense"]
     final_rows.append(row)
 final_table = pd.DataFrame(final_rows).round(1)
 final_table
