@@ -57,6 +57,15 @@ def one_entry_per_chunk(texts: Sequence[str]) -> tuple[list[str], list[int]]:
     return list(texts), list(range(len(texts)))
 
 
+def masked_top_k(scores: np.ndarray, allowed: np.ndarray | None, k: int) -> Ranking:
+    """Pre-filter: топ-k только среди чанков, прошедших фильтр, по полному массиву score — подходящий чанк
+    не теряется, даже если без фильтра он был бы ниже k-го места."""
+    if allowed is None:
+        return top_k(scores, k)
+    candidates = np.flatnonzero(allowed)
+    return [(int(candidates[i]), s) for i, s in top_k(scores[candidates], k)] if len(candidates) else []
+
+
 def filter_ranking(ranking: Ranking, allowed: np.ndarray | None) -> Ranking:
     """Выдача без чанков, не прошедших фильтр метаданных (маска по индексам чанков)."""
     return ranking if allowed is None else [(i, s) for i, s in ranking if allowed[i]]

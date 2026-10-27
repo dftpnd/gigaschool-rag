@@ -67,7 +67,7 @@ from gigarag.gold import load_gold
 from gigarag.profiling import traced_peak_mb
 from gigarag.relevance import build_qrels
 from gigarag.retrieval import Bm25Index, bm25_tokens, top_k
-from gigarag.search import filter_ranking, ranked_ids
+from gigarag.search import masked_top_k, ranked_ids
 from gigarag.vectordb import IndexConfig, QdrantContainer, build_collection
 
 pd.set_option("display.max_colwidth", 120)
@@ -188,17 +188,21 @@ for spec in EMBEDDERS:
     vectors, embed_seconds = embed_corpus(spec, model)
     gold_vectors = encode(model, list(queries.values()), prefix=spec.query_prefix)
     latency_vectors = encode(model, latency_queries, prefix=spec.query_prefix)
-    latencies = query_latencies(model, latency_queries, prefix=spec.query_prefix)
+    embed_latencies = query_latencies(model, latency_queries, prefix=spec.query_prefix)
+    total_latencies = query_latencies(model, latency_queries, prefix=spec.query_prefix,
+                                      search=lambda v, vectors=vectors: top_k(vectors @ v, DEPTH))
     rankings = {qid: top_k(vectors @ v, POOL) for qid, v in zip(queries, gold_vectors, strict=True)}
     model_per_q.append(evaluate(spec.short_name, "dense", rankings))
     model_negatives.append(near_negatives(spec.short_name, rankings))
     model_vectors[spec.short_name] = vectors
     model_query_vectors[spec.short_name] = (dict(zip(queries, gold_vectors, strict=True)), latency_vectors,
-                                            np.median(latencies))
+                                            np.median(embed_latencies))
     avg, retrieval = RUMTEB[spec.short_name]
     model_rows.append({"config": spec.short_name, "параметров, M": spec.params_millions,
                        "размер, МБ": model_size_mb(model), "размерность": vectors.shape[1],
-                       "эмбеддинг корпуса, с": embed_seconds, "запрос, мс": np.median(latencies) * 1000,
+                       "эмбеддинг корпуса, с": embed_seconds,
+                       "эмбеддинг запроса, мс": np.median(embed_latencies) * 1000,
+                       "запрос с поиском, мс": np.median(total_latencies) * 1000,
                        "ruMTEB Avg": avg, "ruMTEB Retrieval": retrieval})
     del model
     torch.cuda.empty_cache()
@@ -284,7 +288,9 @@ def qdrant_run(config: IndexConfig, vectors: np.ndarray, gold_vectors: dict, lat
         return {"index_seconds": seconds, "peak_mb": peak, "resident_mb": resident, "latencies": latencies.tolist(),
                 "rankings": dict(zip(gold_vectors, rankings, strict=True))}
     path = cache.path(f"qdrant_{label}", "json", vectors=array_fingerprint(vectors), image=vectordb.QDRANT_IMAGE,
-                      limit=POOL, measures=("peak", "resident_after_restart"), **config.params())
+                      qids=list(gold_vectors), queries=array_fingerprint(np.stack(list(gold_vectors.values()))),
+                      latency_queries=array_fingerprint(np.asarray(latency_vectors)), limit=POOL, depth=DEPTH,
+                      code=code_fingerprint(vectordb), measures=("peak", "resident_after_restart"), **config.params())
     return load_or_compute(path, compute, load=read_json, save=write_json)
 
 
@@ -350,15 +356,19 @@ def bm25_rankings(index: Bm25Index) -> dict:
     return {qid: index.search(q, POOL) for qid, q in queries.items()}
 
 
-def bm25_grid() -> pd.DataFrame:
-    frames = [evaluate(f"k1={k1}, b={b}", "bm25", bm25_rankings(Bm25Index.from_tokens(bm25_corpus_tokens, k1, b)))
-              .assign(k1=k1, b=b) for k1 in K1_GRID for b in B_GRID]
-    return pd.concat(frames, ignore_index=True)
+def bm25_grid_rankings() -> dict:
+    """Выдачи BM25 для каждой пары (k1, b) — ключ «k1|b». Кэшируются только выдачи: метрики пересчитываются
+    при каждом исполнении, поэтому правка gold или разбиения не подхватит старые цифры."""
+    return {f"{k1}|{b}": bm25_rankings(Bm25Index.from_tokens(bm25_corpus_tokens, k1, b))
+            for k1 in K1_GRID for b in B_GRID}
 
 
-grid_per_q = load_or_compute(cache.path("bm25_grid", "parquet", texts=texts_fingerprint(texts), k1=K1_GRID, b=B_GRID,
-                                        code=code_fingerprint(gigarag.patterns, gigarag.retrieval)),
-                             bm25_grid, load=read_parquet, save=write_parquet)
+grid_rankings = load_or_compute(
+    cache.path("bm25_grid_rankings", "json", texts=texts_fingerprint(texts), queries=sorted(queries.items()),
+               k1=K1_GRID, b=B_GRID, pool=POOL, code=code_fingerprint(gigarag.patterns, gigarag.retrieval)),
+    bm25_grid_rankings, load=read_json, save=write_json)
+grid_per_q = pd.concat([evaluate(f"k1={k1}, b={b}", "bm25", grid_rankings[f"{k1}|{b}"]).assign(k1=k1, b=b)
+                        for k1 in K1_GRID for b in B_GRID], ignore_index=True)
 grid = grid_per_q[grid_per_q["split"] == "validation"].groupby(["k1", "b"])[["R@5", "NDCG@5"]].mean() * 100
 fig, axes = plt.subplots(1, 2, figsize=(11, 3.6))
 for ax, column in zip(axes, ["R@5", "NDCG@5"], strict=True):
@@ -464,17 +474,28 @@ pd.concat({f"{hybrid} vs {component}": pd.DataFrame({
 # %% [markdown]
 # ### Hybrid + фильтр по патчу из КТ 2
 #
-# Фильтр метаданных из КТ 2: если вопрос называет патч, кандидаты обоих поисковиков сужаются до этого патча
-# (или упоминающих его) до слияния.
+# Фильтр метаданных из КТ 2: если вопрос называет патч, поиск идёт только среди чанков этого патча
+# (или упоминающих его). Это настоящий pre-filter: маска применяется к полному массиву score каждого поисковика
+# до отбора топ-100, поэтому подходящий чанк не теряется, даже если без фильтра он был бы ниже сотого места.
+# Dense здесь — точный перебор numpy по тем же векторам BGE-M3: Qdrant flat — тоже точный перебор, их выдачи
+# совпадают (проверка ниже). В проде это payload-фильтр Qdrant.
 
 # %%
 patch_masks = metadata.filter_masks(metadata.patch_filter(meta, texts), meta, queries)
 best_hybrid = max(hybrid_names, key=lambda name: tuple(summary(pipeline_per_q).loc[name, ["R@5", "NDCG@5"]]))
 
 
+exact_dense = {qid: top_k(best_vectors @ v, DEPTH) for qid, v in best_gold_vectors.items()}
+flat_rankings = index_runs["flat"]["rankings"]
+flat_match = np.mean([metrics.overlap_at_k(ranked_ids(exact_dense[qid]), ranked_ids(flat_rankings[qid]), DEPTH)
+                      for qid in queries])
+print(f"совпадение топ-10 numpy и Qdrant flat: {flat_match:.1%}")
+
+
 def fuse_filtered(qid: str) -> list:
     mask = patch_masks.get(qid)
-    dense, sparse = filter_ranking(dense_rankings[qid], mask), filter_ranking(sparse_rankings[qid], mask)
+    dense = masked_top_k(best_vectors @ best_gold_vectors[qid], mask, POOL)
+    sparse = masked_top_k(bm25_best.scores(queries[qid]), mask, POOL)
     if best_hybrid == "hybrid RRF":
         return fusion.rrf_fusion([dense, sparse], POOL)
     return fusion.weighted_fusion(dense, sparse, best_alpha, POOL)
@@ -508,7 +529,7 @@ def add_row(model, index, pipeline, per_q, query_ms, ram_mb):
 
 for name in model_table.index:
     add_row(name, "numpy, точный", "dense", model_per_q[model_per_q["config"] == name],
-            model_table.loc[name, "запрос, мс"], model_vectors[name].nbytes / 2 ** 20)
+            model_table.loc[name, "запрос с поиском, мс"], model_vectors[name].nbytes / 2 ** 20)
 for name in index_table.index:
     add_row(best_model, f"Qdrant {name}", "dense", index_per_q[index_per_q["config"] == name],
             best_embed_latency * 1000 + index_table.loc[name, "запрос, мс"], index_table.loc[name, "RAM индекса, МБ"])

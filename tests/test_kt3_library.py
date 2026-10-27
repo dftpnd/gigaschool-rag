@@ -115,3 +115,25 @@ def test_array_fingerprint_depends_on_content_and_shape():
 def test_traced_peak_mb_sees_allocation():
     value, peak = traced_peak_mb(lambda: np.ones(2 ** 20, dtype=np.float64))
     assert value.size == 2 ** 20 and peak >= 7.5
+
+
+def test_masked_top_k_is_true_prefilter():
+    from gigarag.search import masked_top_k
+    scores = np.array([0.9, 0.8, 0.7, 0.1])
+    allowed = np.array([False, False, False, True])
+    # без фильтра чанк 3 — последний, но pre-filter его находит
+    assert masked_top_k(scores, allowed, 2) == [(3, pytest.approx(0.1))]
+    assert ranked_ids(masked_top_k(scores, None, 2)) == [0, 1]
+    assert masked_top_k(scores, np.zeros(4, dtype=bool), 2) == []
+
+
+def test_query_latencies_includes_search():
+    from gigarag.embeddings import query_latencies
+
+    class FakeModel:
+        def encode(self, texts, **_):
+            return np.ones((len(texts), 2), dtype=np.float32)
+
+    calls = []
+    latencies = query_latencies(FakeModel(), ["a", "b"], search=calls.append)
+    assert len(latencies) == 2 and len(calls) == 3  # прогрев + два запроса
