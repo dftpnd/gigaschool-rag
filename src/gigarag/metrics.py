@@ -69,6 +69,11 @@ def average_precision(ranking: Sequence[int], evidence: Sequence[EvidenceChunks]
     return sum(precisions) / min(len(relevant), k) if relevant else 0.0
 
 
+def overlap_at_k(ranking: Sequence[int], reference: Sequence[int], k: int) -> float:
+    """|топ-k ∩ эталонный топ-k| / k — ANN recall: какую долю точной выдачи нашёл приближённый индекс."""
+    return len(set(ranking[:k]) & set(reference[:k])) / k
+
+
 def has_evidence(evidence: Sequence[EvidenceChunks]) -> bool:
     return any(e.grade >= RELEVANT for e in evidence)
 

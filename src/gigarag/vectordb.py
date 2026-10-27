@@ -1,7 +1,9 @@
 """Векторная БД Qdrant в Docker: конфигурации индекса, индексирование, поиск и замер памяти.
 
 Каждая конфигурация индексируется в свежем контейнере: пик памяти контейнера (`memory.peak` cgroup v2)
-тогда относится к одному индексированию, а не к сумме всех предыдущих.
+тогда относится к одному индексированию, а не к сумме всех предыдущих. Пик cgroup включает страничный кэш
+файлов, которые Qdrant пишет на диск (WAL, сегменты), поэтому рядом меряется и собственная память процесса
+(`anon` из `memory.stat`) — столько RAM индекс занимает на самом деле.
 """
 
 import socket
@@ -31,13 +33,15 @@ class IndexConfig:
     ef_construct: int = 100
     hnsw_ef: int = 64             # ширина поиска по графу: больше — точнее и медленнее
     int8: bool = False            # скалярная квантизация векторов в int8, поиск с пересчётом по исходным
+    on_disk: bool = False         # исходные векторы на диске (mmap), в RAM — только граф и int8-копии
 
     @property
     def exact(self) -> bool:
         return self.hnsw_m == 0
 
     def params(self) -> dict:
-        return {"hnsw_m": self.hnsw_m, "ef_construct": self.ef_construct, "hnsw_ef": self.hnsw_ef, "int8": self.int8}
+        return {"hnsw_m": self.hnsw_m, "ef_construct": self.ef_construct, "hnsw_ef": self.hnsw_ef, "int8": self.int8,
+                "on_disk": self.on_disk}
 
 
 def free_port() -> int:
@@ -79,11 +83,18 @@ class QdrantContainer:
             time.sleep(0.2)
         raise TimeoutError(f"Qdrant {self.name} не поднялся за {READY_TIMEOUT_S} с")
 
+    def _cgroup_file(self, name: str) -> str:
+        return subprocess.run(["docker", "exec", self.name, "cat", f"/sys/fs/cgroup/{name}"],
+                              check=True, capture_output=True, text=True).stdout
+
     def peak_memory_mb(self) -> float:
-        """Пиковая память контейнера с момента запуска, МБ (cgroup v2 `memory.peak`)."""
-        out = subprocess.run(["docker", "exec", self.name, "cat", "/sys/fs/cgroup/memory.peak"],
-                             check=True, capture_output=True, text=True).stdout
-        return int(out) / MIB
+        """Пиковая память контейнера с момента запуска, МБ (cgroup v2 `memory.peak`, со страничным кэшем)."""
+        return int(self._cgroup_file("memory.peak")) / MIB
+
+    def anon_memory_mb(self) -> float:
+        """Текущая собственная память процессов контейнера без страничного кэша, МБ (`anon` в `memory.stat`)."""
+        stats = dict(line.split() for line in self._cgroup_file("memory.stat").splitlines())
+        return int(stats["anon"]) / MIB
 
     def client(self):
         from qdrant_client import QdrantClient
@@ -97,7 +108,8 @@ def build_collection(client, name: str, vectors: np.ndarray, config: IndexConfig
     start = time.perf_counter()
     client.create_collection(
         name,
-        vectors_config=models.VectorParams(size=vectors.shape[1], distance=models.Distance.COSINE),
+        vectors_config=models.VectorParams(size=vectors.shape[1], distance=models.Distance.COSINE,
+                                           on_disk=config.on_disk),
         hnsw_config=models.HnswConfigDiff(m=config.hnsw_m, ef_construct=config.ef_construct),
         # Порог 1 КБ: граф строится на любом объёме, иначе маленькие сегменты Qdrant оставляет без индекса.
         optimizers_config=models.OptimizersConfigDiff(indexing_threshold=1),

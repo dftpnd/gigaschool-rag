@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping, Sequence
 
 import numpy as np
 
-from gigarag.retrieval import Bm25Index, Ranking, bm25_tokens, top_k
+from gigarag.retrieval import Bm25Index, Ranking, top_k
 
 Scorer = Callable[[str], np.ndarray]  # запрос → score каждой записи индекса
 DEPTH = 10                            # глубина выдачи: максимальное k в метриках
@@ -42,7 +42,7 @@ def search_all(scorer: Scorer, queries: Mapping[str, str], owners: Sequence[int]
 
 def bm25_scorer(texts: Sequence[str]) -> Scorer:
     index = Bm25Index.build(texts)
-    return lambda query: index.bm25.get_scores(bm25_tokens(query))
+    return index.scores
 
 
 def dense_scorer(entry_vectors: np.ndarray, query_vectors: Mapping[str, np.ndarray],

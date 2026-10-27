@@ -35,8 +35,14 @@ class Bm25Index:
         """Индекс по уже токенизированным текстам — для перебора k1 и b без повторной токенизации."""
         return cls(BM25Okapi(list(tokens), k1=k1, b=b))
 
+    def scores(self, query: str) -> np.ndarray:
+        """Score каждого текста. У текста без слов (чанк «.....») при b = 1 нормировка длины даёт 0/0 —
+        такой score считается нулевым, а не NaN, иначе NaN ломает сортировку выдачи."""
+        with np.errstate(invalid="ignore"):  # 0/0 ожидаем и заменяем нулём
+            return np.nan_to_num(self.bm25.get_scores(bm25_tokens(query)), nan=0.0)
+
     def search(self, query: str, k: int) -> Ranking:
-        return top_k(self.bm25.get_scores(bm25_tokens(query)), k)
+        return top_k(self.scores(query), k)
 
 
 def dense_search(passage_vectors: np.ndarray, query_vector: np.ndarray, k: int) -> Ranking:

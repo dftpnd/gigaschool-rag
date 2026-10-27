@@ -62,6 +62,19 @@ def test_average_precision():
     assert metrics.average_precision([2], ev, 10) == 0.0
 
 
+def test_overlap_at_k():
+    assert metrics.overlap_at_k([1, 2, 3, 9], [3, 2, 1, 4], 3) == 1.0
+    assert metrics.overlap_at_k([1, 9], [1, 2], 2) == 0.5
+
+
+def test_bm25_empty_text_scores_zero_not_nan():
+    from gigarag.retrieval import Bm25Index
+    index = Bm25Index.build(["урон увеличен", ".....", "броня уменьшена"], k1=1.2, b=1.0)
+    scores = index.scores("урон")
+    assert not np.isnan(scores).any() and scores[1] == 0.0
+    assert ranked_ids(index.search("урон", 1)) == [0]
+
+
 def test_negative_near_share():
     items = [GoldItem("n1", "negative", "?", "", (Evidence("p", "d", 1, "q"),)),
              GoldItem("f1", "factual", "?", "", (Evidence("p", "d", 2, "q"),))]
