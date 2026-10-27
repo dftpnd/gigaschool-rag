@@ -7,6 +7,7 @@ import pytest
 from gigarag.atomic import atomic_save, temp_path
 from gigarag.cache import CacheStore, code_fingerprint, load_or_compute
 from gigarag.http import PoliteFetcher, RetryPolicy, send_with_retries
+from gigarag.parallel import parallel_map
 from gigarag.sources.dota2ru import pending_comment_pages
 from gigarag.sources.topic_lexicon import build_topic_matcher
 
@@ -83,7 +84,7 @@ def test_interrupted_save_leaves_no_file(tmp_path):
 
     with pytest.raises(KeyboardInterrupt):
         atomic_save(broken_save, "value", target)
-    assert not target.exists() and not temp_path(target).exists()
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_load_or_compute_recomputes_after_interrupted_save(tmp_path):
@@ -98,8 +99,16 @@ def test_load_or_compute_recomputes_after_interrupted_save(tmp_path):
     assert load_or_compute(path, lambda: "v2", load=load, save=lambda v, p: p.write_text(v)) == "v2"
 
 
-def test_temp_path_keeps_extension(tmp_path):
+def test_temp_path_keeps_extension_and_is_unique(tmp_path):
     assert temp_path(tmp_path / "a.npy").suffix == ".npy"
+    assert temp_path(tmp_path / "a.npy") != temp_path(tmp_path / "a.npy")
+
+
+def test_parallel_saves_of_same_path(tmp_path):
+    target = tmp_path / "same.json"
+    parallel_map(lambda i: atomic_save(lambda v, p: p.write_text(v), str(i), target), range(64), workers=16)
+    assert target.read_text() in {str(i) for i in range(64)}
+    assert [p.name for p in tmp_path.iterdir()] == ["same.json"]
 
 
 # ---------- отпечаток кода в ключе кэша ----------

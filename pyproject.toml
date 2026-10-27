@@ -2,7 +2,7 @@
 name = "gigaschool-rag"
 version = "0.1.0"
 description = "Сквозной RAG-проект курса LLM-инженер (GigaSchool)"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.15"  # torch: колёса есть для 3.12–3.14
 dependencies = [
     "chonkie[neural,semantic,st]==1.7.0",
     "datasketch>=2.0.0",

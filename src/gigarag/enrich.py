@@ -76,4 +76,8 @@ def eligible(token_counts: Sequence[int], min_tokens: int = MIN_TOKENS) -> list[
 
 
 def complete_all(chat: CachedChat, requests: Sequence[ChatRequest], workers: int = 16) -> list[ChatResponse]:
-    return parallel_map(chat.complete, requests, workers)
+    """Ответы в порядке `requests`. Одинаковые запросы (повторяющийся текст чанка) отправляются один раз:
+    это дешевле и исключает одновременную запись одного файла кэша несколькими потоками."""
+    unique = {request.key(): request for request in requests}
+    responses = dict(zip(unique, parallel_map(chat.complete, list(unique.values()), workers), strict=True))
+    return [responses[request.key()] for request in requests]

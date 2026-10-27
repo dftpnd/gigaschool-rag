@@ -178,3 +178,20 @@ def test_enrich_helpers():
     assert enrich.parse_questions('{"questions": [" a ", "", 3, "b"]}') == ["a", "b"]
     assert enrich.eligible([5, 30, 100], min_tokens=30) == [1, 2]
     assert enrich.Usage(1, 1_000_000, 1_000_000, 0).cost_usd == pytest.approx(sum(enrich.PRICE_PER_MILLION))
+
+
+def test_complete_all_sends_duplicate_requests_once():
+    from gigarag.llm import ChatResponse
+
+    class CountingChat:
+        def __init__(self):
+            self.calls = []
+
+        def complete(self, request):
+            self.calls.append(request.key())
+            return ChatResponse(request.messages[-1][1].upper(), 1, 1)
+
+    chat = CountingChat()
+    requests = [enrich.summary_request(t) for t in ["а", "б", "а", "а"]]
+    assert [r.content for r in enrich.complete_all(chat, requests)] == ["А", "Б", "А", "А"]
+    assert len(chat.calls) == 2
