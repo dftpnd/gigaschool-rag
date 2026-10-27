@@ -284,7 +284,7 @@ def qdrant_run(config: IndexConfig, vectors: np.ndarray, gold_vectors: dict, lat
         return {"index_seconds": seconds, "peak_mb": peak, "resident_mb": resident, "latencies": latencies.tolist(),
                 "rankings": dict(zip(gold_vectors, rankings, strict=True))}
     path = cache.path(f"qdrant_{label}", "json", vectors=array_fingerprint(vectors), image=vectordb.QDRANT_IMAGE,
-                      limit=POOL, **config.params())
+                      limit=POOL, measures=("peak", "resident_after_restart"), **config.params())
     return load_or_compute(path, compute, load=read_json, save=write_json)
 
 
