@@ -260,7 +260,9 @@ best_gold_vectors, best_latency_vectors, best_embed_latency = model_query_vector
 # процесса плюс отображённые в память файлы (`anon` + `file_mapped`). Запросы и выдачи — после перезапуска.
 # Время запроса — медиана по 100 запросам (top-10, по одному запросу, HTTP-клиент на той же машине); векторы запросов
 # посчитаны заранее, время эмбеддинга запроса — в разделе 2.
-# **ANN recall@10** — доля точного топ-10 (flat), которую нашёл приближённый индекс.
+# **ANN recall@10** — доля точного топ-10 (flat), которую нашёл приближённый индекс. Граф HNSW Qdrant строит
+# в несколько потоков, и от сборки к сборке он разный, поэтому каждая конфигурация индексируется трижды:
+# в таблице — среднее по сборкам и минимум ANN recall, R@5 — средний и разброс по сборкам.
 
 # %%
 INDEX_CONFIGS = [
@@ -271,7 +273,8 @@ INDEX_CONFIGS = [
 ]
 
 
-def qdrant_run(config: IndexConfig, vectors: np.ndarray, gold_vectors: dict, latency_vectors, label: str) -> dict:
+def qdrant_run(config: IndexConfig, vectors: np.ndarray, gold_vectors: dict, latency_vectors, label: str,
+               repeat: int = 0) -> dict:
     """Индексирование в свежем контейнере, выдачи gold (top-POOL) и задержки 100 запросов; кэшируется,
     поэтому повторное исполнение ноутбука Docker не требует."""
     def compute() -> dict:
@@ -290,23 +293,37 @@ def qdrant_run(config: IndexConfig, vectors: np.ndarray, gold_vectors: dict, lat
     path = cache.path(f"qdrant_{label}", "json", vectors=array_fingerprint(vectors), image=vectordb.QDRANT_IMAGE,
                       qids=list(gold_vectors), queries=array_fingerprint(np.stack(list(gold_vectors.values()))),
                       latency_queries=array_fingerprint(np.asarray(latency_vectors)), limit=POOL, depth=DEPTH,
-                      code=code_fingerprint(vectordb), measures=("peak", "resident_after_restart"), **config.params())
+                      code=code_fingerprint(vectordb), measures=("peak", "resident_after_restart"), repeat=repeat,
+                      **config.params())
     return load_or_compute(path, compute, load=read_json, save=write_json)
 
 
-index_runs = {c.name: qdrant_run(c, best_vectors, best_gold_vectors, best_latency_vectors, best_model)
-              for c in INDEX_CONFIGS}
-exact_top = {qid: ranked_ids(r) for qid, r in index_runs["flat"]["rankings"].items()}
-index_per_q = pd.concat([evaluate(name, "dense", run["rankings"]) for name, run in index_runs.items()])
+REPEATS = 3  # граф HNSW строится в несколько потоков и от сборки к сборке разный
+index_runs = {c.name: [qdrant_run(c, best_vectors, best_gold_vectors, best_latency_vectors, best_model, repeat)
+                       for repeat in range(REPEATS)] for c in INDEX_CONFIGS}
+exact_top = {qid: ranked_ids(r) for qid, r in index_runs["flat"][0]["rankings"].items()}
+
+
+def ann_recall(run: dict) -> float:
+    return 100 * np.mean([metrics.overlap_at_k(ranked_ids(r), exact_top[qid], DEPTH)
+                          for qid, r in run["rankings"].items()])
+
+
+index_per_q = pd.concat([evaluate(name, "dense", run["rankings"]).assign(repeat=repeat)
+                         for name, runs in index_runs.items() for repeat, run in enumerate(runs)])
 index_table = pd.DataFrame([{
-    "config": name, "индексирование, с": run["index_seconds"], "запрос, мс": np.median(run["latencies"]) * 1000,
-    "p95, мс": np.percentile(run["latencies"], 95) * 1000, "пик RAM, МБ": run["peak_mb"],
-    "RAM индекса, МБ": run["resident_mb"],
-    "ANN recall@10, %": 100 * np.mean([metrics.overlap_at_k(ranked_ids(r), exact_top[qid], DEPTH)
-                                       for qid, r in run["rankings"].items()]),
-} for name, run in index_runs.items()]).set_index("config")
-index_table = index_table.join(summary(index_per_q, columns=["R@5", "NDCG@5"])).round(2)
-index_table
+    "config": name, "индексирование, с": np.mean([r["index_seconds"] for r in runs]),
+    "запрос, мс": np.median([t for r in runs for t in r["latencies"]]) * 1000,
+    "p95, мс": np.percentile([t for r in runs for t in r["latencies"]], 95) * 1000,
+    "пик RAM, МБ": np.mean([r["peak_mb"] for r in runs]), "RAM индекса, МБ": np.mean([r["resident_mb"] for r in runs]),
+    "ANN recall@10, % (среднее)": np.mean([ann_recall(r) for r in runs]),
+    "ANN recall@10, % (минимум)": min(ann_recall(r) for r in runs),
+} for name, runs in index_runs.items()]).set_index("config")
+r5_by_build = index_per_q[index_per_q["split"] == "validation"].groupby(["config", "repeat"], sort=False)["R@5"].mean()
+index_table = index_table.join(summary(index_per_q, columns=["R@5", "NDCG@5"]))
+index_table["R@5 (мин–макс по сборкам)"] = [f"{r5_by_build[name].min() * 100:.1f}–{r5_by_build[name].max() * 100:.1f}"
+                                           for name in index_table.index]
+index_table.round(2)
 
 # %% [markdown]
 # ### Scalability
@@ -400,12 +417,12 @@ print(f"BM25 k1={best_k1}, b={best_b}: индексирование {bm25_index_
 # ## 5. Dense: лучшая модель + лучший индекс
 #
 # Не новый эксперимент, а сборка: модель — лучшая на validation из раздела 2, индекс — самая быстрая
-# конфигурация Qdrant, которая не теряет соседей (ANN recall@10 ≥ 99%) из раздела 3.
+# конфигурация Qdrant, которая не теряет соседей ни в одной из трёх сборок (минимум ANN recall@10 ≥ 99%).
 
 # %%
-lossless = index_table[index_table["ANN recall@10, %"] >= 99]
+lossless = index_table[index_table["ANN recall@10, % (минимум)"] >= 99]  # без потерь в каждой сборке
 best_index = lossless["запрос, мс"].idxmin()
-dense_rankings = index_runs[best_index]["rankings"]
+dense_rankings = index_runs[best_index][0]["rankings"]
 dense_query_ms = best_embed_latency * 1000 + index_table.loc[best_index, "запрос, мс"]
 print(f"dense: {best_model} + {best_index}; запрос = эмбеддинг {best_embed_latency * 1000:.1f} мс "
       f"+ Qdrant {index_table.loc[best_index, 'запрос, мс']:.1f} мс")
@@ -486,7 +503,7 @@ best_hybrid = max(hybrid_names, key=lambda name: tuple(summary(pipeline_per_q).l
 
 
 exact_dense = {qid: top_k(best_vectors @ v, DEPTH) for qid, v in best_gold_vectors.items()}
-flat_rankings = index_runs["flat"]["rankings"]
+flat_rankings = index_runs["flat"][0]["rankings"]
 flat_match = np.mean([metrics.overlap_at_k(ranked_ids(exact_dense[qid]), ranked_ids(flat_rankings[qid]), DEPTH)
                       for qid in queries])
 print(f"совпадение топ-10 numpy и Qdrant flat: {flat_match:.1%}")
