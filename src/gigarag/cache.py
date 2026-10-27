@@ -97,3 +97,9 @@ def load_or_compute_timed[T](path: Path, compute: Callable[[], T], *, load: Call
     atomic_save(save, value, path)
     atomic_save(write_json, seconds, seconds_path)
     return value, seconds
+
+
+def array_fingerprint(array: np.ndarray) -> str:
+    """Отпечаток массива: форма, тип и байты — для ключей кэша, зависящих от векторов."""
+    payload = f"{array.shape}|{array.dtype}|".encode() + np.ascontiguousarray(array).tobytes()
+    return hashlib.sha256(payload).hexdigest()[:16]
