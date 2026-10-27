@@ -29,6 +29,13 @@ _ADS_MARKER = re.compile(r"промокод|ставк|казино|букмек
 _TOPIC_WORD = re.compile(r"(?u)\b[^\W\d_]{3,}\b")
 _NUMERIC_CHANGE = re.compile(r"\bс\s+[\d.,/%]+\s*%?\s+(?:до|на)\s+[\d.,/%]+")
 _HAS_DIGIT = re.compile(r"\d")
+_LINE_BREAK_TAG = re.compile(r"<br\s*/?>", re.IGNORECASE)
+_BLOCK_END_TAG = re.compile(r"</(?:p|div|li|ul|ol|h[1-6]|tr|table|blockquote)>", re.IGNORECASE)
+_INLINE_SPACE = re.compile(r"[^\S\n]+")
+_EXTRA_BLANK_LINES = re.compile(r"\n{3,}")
+_INVISIBLE_CHAR = re.compile("[\u00ad\u200b-\u200f\u2060\ufe0e\ufe0f\ufeff]")
+# Знаки, которые несут смысл: пунктуация, а также % + / = < > № ° × в числах патчноутов («+10%», «1/2/3»).
+_DECORATIVE_SYMBOL = re.compile(r"[^\w\s.,!?:;…\-–—«»\"'()\[\]%+/=<>№°×]|_")
 
 
 def _spans(rx: re.Pattern, text: str) -> list[Span]:
@@ -55,6 +62,12 @@ def has_html_entity(text: str) -> bool:
     return _ENTITY.search(text) is not None
 
 
+def tags_to_line_breaks(html: str) -> str:
+    """`<br>` и конец блочного тега (`</p>`, `</div>`, `</li>`…) → перевод строки:
+    после снятия тегов абзацы и строки остаются, и чанкерам есть на что опираться."""
+    return _BLOCK_END_TAG.sub("\n", _LINE_BREAK_TAG.sub("\n", html))
+
+
 # ---------- ссылки ----------
 
 def url_spans(text: str) -> list[Span]:
@@ -64,6 +77,10 @@ def url_spans(text: str) -> list[Span]:
 
 def has_url(text: str) -> bool:
     return _URL.search(text) is not None
+
+
+def remove_urls(text: str) -> str:
+    return _URL.sub(" ", text)
 
 
 def news_links(html: str) -> list[str]:
@@ -106,10 +123,27 @@ def special_spans(text: str) -> list[Span]:
     return _spans(_SPECIAL, text)
 
 
+def remove_decorative_symbols(text: str) -> str:
+    """Убирает оформительские знаки (•, ►, ✔, |, #, @…), оставляя пунктуацию и знаки, нужные числам."""
+    return _DECORATIVE_SYMBOL.sub(" ", text)
+
+
+def remove_invisible_chars(text: str) -> str:
+    """Мягкий перенос, пробелы нулевой ширины, метки направления и селекторы вариантов эмодзи."""
+    return _INVISIBLE_CHAR.sub("", text)
+
+
 # ---------- слова и пробелы ----------
 
 def collapse_whitespace(text: str) -> str:
     return _WHITESPACE.sub(" ", text).strip()
+
+
+def tidy_lines(text: str) -> str:
+    """Пробелы внутри строки схлопнуты, строки обрезаны, подряд не больше одной пустой строки:
+    границы абзацев сохраняются, лишние пробелы — нет."""
+    lines = (_INLINE_SPACE.sub(" ", line).strip() for line in text.split("\n"))
+    return _EXTRA_BLANK_LINES.sub("\n\n", "\n".join(lines)).strip()
 
 
 def sentences(text: str) -> list[str]:
