@@ -96,6 +96,14 @@ details.scale { margin:6px 0; } details.scale ul { margin:4px 0; }
 </style></head><body><main>
 <header><h1 style="margin:8px 0">Разметка ответов</h1><span id="progress" class="muted"></span></header>
 <div class="dots" id="dots"></div>
+<div class="card"><b>Главное</b><ul>
+<li>Оценивайте ответ <b>относительно фрагментов</b>, а не по своему знанию игры.</li>
+<li><b>Достоверность</b> — только «нет ли в ответе того, чего нет во фрагментах». Не «верно ли в игре»
+и не «полезен ли ответ».</li>
+<li><b>Ответ «Не знаю…»</b>: достоверность — 5 (ничего не утверждает). Релевантность и использование контекста —
+5 и 5, если ответа во фрагментах нет, и 1 и 1, если ответ во фрагментах есть.</li>
+<li>Ответил на часть вопроса и прямо сказал, какой части нет, — релевантность 3.</li>
+</ul></div>
 <div class="card"><b>Шкалы</b> (те же, что у судьи)__SCALES__</div>
 <div class="card"><div class="muted" id="pos"></div><p class="q" id="question"></p>
 <div><b>Ответ системы</b><div class="answer" id="answer"></div></div>
