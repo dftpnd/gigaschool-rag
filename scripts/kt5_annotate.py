@@ -1,19 +1,21 @@
 """Ручная разметка ответов КТ 5: локальный веб-сервер со страницей разметки.
 
-    python kt5_annotate.py
+    python kt5_annotate.py dev|holdout
 
-Выборку пишет ноутбук `kt5_generation` (`gold/kt5_annotation_sample.json`). Каждая сохранённая оценка сразу
-записывается в `gold/kt5_human_labels.json`, поэтому разметку можно прервать и продолжить.
+Выборки пишет ноутбук `kt5_generation`, пути — `settings.ANNOTATION_SETS`. Каждая сохранённая оценка сразу
+записывается в файл оценок выборки, поэтому разметку можно прервать и продолжить.
 """
 
 import json
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock
 
 from gigarag import annotation
-from settings import ANNOTATION_HOST, ANNOTATION_PORT, ANNOTATION_SAMPLE, HUMAN_LABELS
+from settings import ANNOTATION_HOST, ANNOTATION_PORT, ANNOTATION_SETS
 
-records = annotation.read_sample(ANNOTATION_SAMPLE)
+SAMPLE, HUMAN_LABELS = ANNOTATION_SETS[sys.argv[1] if len(sys.argv) > 1 else "dev"]
+records = annotation.read_sample(SAMPLE)
 known_ids = {r["id"] for r in records}
 page = annotation.page(records).encode()
 write_lock = Lock()

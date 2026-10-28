@@ -13,7 +13,7 @@
 
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from gigarag.enrich import MODEL, SEED, TEMPERATURE
 from gigarag.generation import context_block
@@ -139,13 +139,35 @@ V3 = {criterion: f"""{_ROLE}
 Ответ — строго JSON: {fields}"""
       for criterion, scale in SCALES.items() for fields, rule in [_FIELDS_V3[criterion]]}
 
-PROMPTS = {1: V1, 2: V2, 3: V3}
+# v4: контрольная выборка с искажениями показала, что v3 считает неверное число «неточностью пересказа» (4)
+# и ловит его в трети случаев. Меняется только достоверность: противоречие фрагментам выделено в отдельное поле
+# и правило. Тексты релевантности и использования — те же, что в v3 (те же запросы, те же оценки).
+_FAITHFULNESS_V4 = (
+    '{"contradicted": [утверждения, где число, патч, название или направление изменения отличаются от фрагментов], '
+    '"unsupported": [остальные утверждения ответа, которых нет во фрагментах], '
+    '"minor": [неточности пересказа без изменения смысла, неверные ссылки [n]], "score": 1|2|3|4|5}',
+    "Сверь каждое число, патч и название ответа с фрагментами: другое значение — это противоречие, а не неточность "
+    "пересказа. 1 — противоречит фрагментам главный ответ на вопрос (то значение или изменение, о котором "
+    "спрашивают); 2 — неподтверждённых и противоречащих утверждений больше половины; 3 — в contradicted или "
+    "unsupported есть хотя бы одно утверждение; 4 — оба этих списка пусты, но minor не пуст; 5 — все три списка "
+    "пусты. Отказ («Не знаю…») — все списки пусты, 5.")
+
+V4 = {**V3, "faithfulness": f"""{_ROLE}
+
+{SCALES["faithfulness"].text()}
+
+Заполни поля коротко, без рассуждений вне полей, и поставь балл по правилу: {_FAITHFULNESS_V4[1]}
+Если колеблешься между двумя соседними баллами — ставь меньший.
+Ответ — строго JSON: {_FAITHFULNESS_V4[0]}"""}
+
+PROMPTS = {1: V1, 2: V2, 3: V3, 4: V4}
 
 
 @dataclass(frozen=True)
 class Verdict:
     score: int | None  # None — ответ судьи не по формату
     rationale: str
+    fingerprint: str = ""  # system_fingerprint ответа API; пустой для записей кэша, сделанных до появления поля
 
 
 def judge_user(question: str, passages: Sequence[str], answer: str) -> str:
@@ -175,4 +197,5 @@ def judge_answers(chat, cases: Mapping[object, tuple[str, Sequence[str], str]],
     Каждый критерий — отдельный запрос; запросы идут параллельно, ответы кэшируются `chat`."""
     jobs = [(criterion, key) for key in cases for criterion in CRITERIA]
     responses = parallel_map(lambda job: chat.complete(judge_request(job[0], *cases[job[1]], version)), jobs)
-    return {job: parse_verdict(r.content) for job, r in zip(jobs, responses, strict=True)}
+    return {job: replace(parse_verdict(r.content), fingerprint=r.fingerprint)
+            for job, r in zip(jobs, responses, strict=True)}

@@ -27,6 +27,8 @@ _NEWS_LINK = re.compile(r'href="(/news/\d+-[^"?#]+)"')
 _DATETIME_ATTR = re.compile(r'<time datetime="([^"]+)"')
 _ADS_MARKER = re.compile(r"промокод|ставк|казино|букмекер|фрибет|реклама|erid|бездеп", re.IGNORECASE)
 _TOPIC_WORD = re.compile(r"(?u)\b[^\W\d_]{3,}\b")
+# числовое значение: целое или с десятичной запятой; не часть номера патча (7.36b) и не ссылка на фрагмент [2]
+_VALUE = re.compile(r"(?<![\d.,\[])\d+(?:,\d+)?(?!\.\d|\d|,\d|\])")
 _NUMERIC_CHANGE = re.compile(r"\bс\s+[\d.,/%]+\s*%?\s+(?:до|на)\s+[\d.,/%]+")
 _HAS_DIGIT = re.compile(r"\d")
 _LINE_BREAK_TAG = re.compile(r"<br\s*/?>", re.IGNORECASE)
@@ -221,3 +223,8 @@ def build_any_matcher(patterns: Iterable[str]) -> Callable[[str], bool]:
     """Предикат «текст содержит хотя бы один из шаблонов» (без учёта регистра)."""
     rx = re.compile("|".join(patterns), re.IGNORECASE)
     return lambda text: rx.search(text) is not None
+
+
+def value_spans(text: str) -> list[tuple[int, int]]:
+    """Позиции числовых значений в тексте (урон, проценты, стоимость), без номеров патчей и ссылок [n]."""
+    return [m.span() for m in _VALUE.finditer(text)]

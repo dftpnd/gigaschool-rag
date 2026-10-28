@@ -92,3 +92,49 @@ def test_judge_answers_one_request_per_criterion_and_case():
 def test_v3_verdict_keeps_structured_fields_as_rationale():
     verdict = judge.parse_verdict(json.dumps({"unsupported": [], "minor": ["ссылка"], "score": 4}, ensure_ascii=False))
     assert verdict.score == 4 and "ссылка" in verdict.rationale
+
+
+# ---------- искажения для контроля судьи достоверности ----------
+
+def test_value_spans_skip_patches_and_citations():
+    from gigarag.patterns import value_spans
+    text = "В патче 7.36b урон уменьшен с 6% до 4,5% [1], стоимость 4000 [2][3]. Урон 75/95 до 250."
+    assert [text[a:b] for a, b in value_spans(text)] == ["6", "4,5", "4000", "75", "95", "250"]
+
+
+def test_swap_value_puts_value_absent_from_context():
+    import random
+
+    from gigarag import perturbation
+    passages = ["урон с 75 до 85", "стоимость 151"]
+    answer = "Урон увеличен с 75 до 85 [1]."
+    swapped = perturbation.swap_value(answer, passages, random.Random(0))
+    assert swapped != answer and swapped.count("[1]") == 1
+    new_values = set(perturbation.context_values([swapped])) - set(perturbation.context_values([answer]))
+    assert len(new_values) == 1 and not new_values & perturbation.context_values(passages)
+    assert perturbation.swap_value("Не знаю.", passages, random.Random(0)) is None
+
+
+def test_add_invented_claim_is_deterministic_and_unsupported():
+    import random
+
+    from gigarag import perturbation
+    passages = [" ".join(str(n) for n in range(13, 90))]  # почти все значения заняты
+    answer = "Первый абзац [1].\n\nВторой абзац."
+    claimed = perturbation.add_invented_claim(answer, passages, random.Random(1))
+    assert claimed == perturbation.add_invented_claim(answer, passages, random.Random(1))
+    assert claimed.endswith("\n\nВторой абзац.") and claimed.startswith("Первый абзац [1]. ")
+    added = set(perturbation.context_values([claimed])) - set(perturbation.context_values([answer]))
+    assert added and all(int(v) >= 90 for v in added)
+
+
+def test_openai_chat_keeps_model_identity():
+    import httpx
+
+    from gigarag.llm import OpenAIChat
+    body = {"id": "resp-1", "model": "deepseek-flash", "system_fingerprint": "fp-1",
+            "choices": [{"message": {"content": "ок"}}], "usage": {"prompt_tokens": 3, "completion_tokens": 1}}
+    client = OpenAIChat("key", "https://example.test")
+    client._client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body)))
+    response = client.complete(generation.answer_request("в?", ["ф"]))
+    assert (response.model, response.fingerprint, response.response_id) == ("deepseek-flash", "fp-1", "resp-1")

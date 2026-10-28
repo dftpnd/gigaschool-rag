@@ -51,6 +51,12 @@ class ChatResponse:
     completion_tokens: int
     cached: bool = False
     seconds: float = 0.0  # время ответа API при первом запросе; из кэша возвращается сохранённое, а не время чтения
+    # Идентичность модели, ответившей на запрос: у DeepSeek нет неизменяемого ID версии — алиас `deepseek-flash`
+    # обновляется на сервере, а `system_fingerprint` меняется вместе с конфигурацией бэкенда. В записях кэша,
+    # сделанных до появления полей, они пустые.
+    model: str = ""
+    fingerprint: str = ""
+    response_id: str = ""
 
 
 def chat_request(model: str, system: str, user: str, temperature: float,
@@ -93,7 +99,9 @@ class OpenAIChat:
         body = response.json()
         usage = body.get("usage", {})
         return ChatResponse(body["choices"][0]["message"]["content"],
-                            usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0), seconds=seconds)
+                            usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0), seconds=seconds,
+                            model=body.get("model", ""), fingerprint=body.get("system_fingerprint") or "",
+                            response_id=body.get("id", ""))
 
 
 @dataclass

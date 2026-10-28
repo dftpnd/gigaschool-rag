@@ -38,7 +38,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from gigarag import annotation, baseline, generation, judge, metadata, metrics, tokens
+from gigarag import annotation, baseline, generation, judge, metadata, metrics, perturbation, tokens
+from gigarag.atomic import atomic_write_jsonl
 from gigarag.cache import CacheStore, load_or_compute, read_npy, write_npy
 from gigarag.corpus import Document, read_jsonl
 from gigarag.embeddings import encode, load_sentence_model
@@ -136,25 +137,38 @@ answer_table = pd.DataFrame([{"config": name, "qid": qid, "qtype": by_qid[qid].q
  .mul(100).round(1).rename_axis(columns="доля отказов, %"))
 
 # %% [markdown]
-# ## 3. Выборка для ручной разметки
+# ## 3. Выборки для ручной разметки
 #
-# 30 ответов из 100 — случайная выборка (seed 42) из пар «конфигурация, вопрос», упорядоченных по ключу.
+# Две непересекающиеся случайные выборки (seed 42) из пар «конфигурация, вопрос», упорядоченных по ключу:
+#
+# - **dev** — 30 ответов: по ним итерируется промпт судьи и выбирается его версия;
+# - **holdout** — 20 из оставшихся 70: размечены после того, как версия судьи заморожена; итоговая kappa — по ним.
+#
 # Разметчик видит то же, что судья: вопрос, пять фрагментов и ответ; конфигурация, эталон gold и оценки
-# судьи скрыты. Разметка — `scripts/kt5_annotate.py` (локальный веб-сервер), оценки — `gold/kt5_human_labels.json`.
+# судьи скрыты. Разметка — `scripts/kt5_annotate.py dev|holdout` (локальный веб-сервер).
 
 # %%
-ANNOTATION_SIZE = 30
-annotation_keys = random.Random(42).sample(sorted(answer_keys), ANNOTATION_SIZE)
-annotation_records = [{"id": f"{name}|{qid}", "question": gold_queries[qid],
-                       "passages": context_of((name, qid)), "answer": answers[(name, qid)]}
-                      for name, qid in annotation_keys]
+DEV_SIZE, HOLDOUT_SIZE = 30, 20
+annotation_keys = random.Random(42).sample(sorted(answer_keys), DEV_SIZE)
+holdout_keys = random.Random(42).sample(sorted(set(answer_keys) - set(annotation_keys)), HOLDOUT_SIZE)
+
+
+def annotation_record(key: tuple[str, str]) -> dict:
+    name, qid = key
+    return {"id": f"{name}|{qid}", "question": gold_queries[qid], "passages": context_of(key), "answer": answers[key]}
+
+
+annotation_records = [annotation_record(key) for key in annotation_keys]
+holdout_records = [annotation_record(key) for key in holdout_keys]
 annotation.write_sample(ROOT / "gold" / "kt5_annotation_sample.json", annotation_records)
-pd.Series([key[0] for key in annotation_keys]).value_counts().rename("ответов в выборке")
+annotation.write_sample(ROOT / "gold" / "kt5_annotation_holdout.json", holdout_records)
+pd.DataFrame({"dev": pd.Series([k[0] for k in annotation_keys]).value_counts(),
+              "holdout": pd.Series([k[0] for k in holdout_keys]).value_counts()}).rename_axis("ответов в выборке")
 
 # %% [markdown]
 # ## 4. LLM-судья: итерации промпта и детерминизм
 #
-# Каждая версия промпта (`judge.PROMPTS`) оценивает 30 ответов выборки разметки дважды при t = 0: второй прогон —
+# Каждая версия промпта (`judge.PROMPTS`) оценивает 30 ответов выборки dev дважды при t = 0: второй прогон —
 # с отдельным кэшем (`llm_cache/kt5_repeat`), модель отвечает заново. Agreement — доля ответов с тем же баллом;
 # порог задания — 85%. Шкалы `judge.SCALES` во всех версиях одинаковые — те же, что видит человек.
 #
@@ -163,6 +177,8 @@ pd.Series([key[0] for key in annotation_keys]).value_counts().rename("ответ
 #   для пограничных случаев v1; при колебании — меньший балл.
 # - **v3** — вместо свободного разбора короткие структурированные поля (неподтверждённые утверждения, части вопроса
 #   с отметкой «отвечена», нужные и пропущенные факты, есть ли ответ в контексте) и балл по правилу из них.
+# - **v4** — v3, в которой изменена только достоверность: контрольная выборка (раздел 5) показала, что v3 считает
+#   неверное число «неточностью пересказа»; противоречие фрагментам выделено в отдельное поле и правило.
 
 # %%
 annotation_cases = {key: (gold_queries[key[1]], context_of(key), answers[key]) for key in annotation_keys}
@@ -198,64 +214,134 @@ print(disagreements.groupby(["версия", "критерий"]).size().unstack
 disagreements
 
 # %% [markdown]
-# ## 5. Валидация человеком: weighted Cohen's kappa
+# ## 5. Контрольная выборка достоверности: ловит ли судья выдумку
 #
-# Человек разметил те же 30 ответов по тем же шкалам (`gold/kt5_human_labels.json`), не видя оценок судьи,
-# конфигурации и эталона. Первый проход (`gold/kt5_human_labels_pass1.json`) сделан до того, как правила для
-# отказа и «достоверность — только относительно фрагментов» вынесли на страницу разметки отдельным блоком: в нём
-# отказы получали низкую достоверность вопреки шкале. Решения — по второму проходу, первый — для сравнения.
+# Человек поставил достоверность 5 всем ответам dev — на такой выборке судья, всегда ставящий 5, неотличим
+# от хорошего. Контроль: ответы, которые человек признал достоверными (≥ 4, не отказы), и две их искажённые копии
+# (`gigarag.perturbation`): одно число заменено значением, которого нет во фрагментах, и добавлено выдуманное
+# утверждение со ссылкой [1] и числом, которого нет во фрагментах. Метка — по построению: исходный ответ
+# достоверен, искажённый — нет (по шкале — не выше 3). «Поймал» — балл ≤ 3; kappa — между меткой и «балл ≤ 3».
 #
-# Kappa — с квадратичными весами (`stats.weighted_kappa`), ответы судьи не по формату исключаются из пары.
-# Версия судьи для КТ 5 — среди прошедших порог детерминизма (≥ 85% по всем критериям, без ответов не по формату)
-# та, у которой выше средняя kappa по второму проходу. Kappa посчитана на тех же 30 ответах, по которым выбрана
-# версия, — это оптимистичная оценка.
+# Контроль строится на dev (подбор версии) и отдельно на holdout (проверка замороженной версии).
 
 # %%
 human = annotation.read_labels(ROOT / "gold" / "kt5_human_labels.json")
 human_pass1 = annotation.read_labels(ROOT / "gold" / "kt5_human_labels_pass1.json")
-assert all(annotation.is_complete(human, r["id"]) for r in annotation_records), "разметка второго прохода неполная"
+human_holdout = annotation.read_labels(ROOT / "gold" / "kt5_human_labels_holdout.json")
+assert all(annotation.is_complete(human, r["id"]) for r in annotation_records), "разметка dev неполная"
+assert all(annotation.is_complete(human_holdout, r["id"]) for r in holdout_records), "разметка holdout неполная"
+ORIGINAL, SWAPPED, CLAIMED = "исходный", "число заменено", "добавлен факт"
 
 
-def kappa(verdicts, labels, criterion: str) -> float:
-    pairs = [(verdicts[(criterion, key)].score, labels[f"{key[0]}|{key[1]}"][criterion]) for key in annotation_keys]
+def control_cases(keys, labels) -> dict:
+    """(ключ ответа, вид) → (вопрос, фрагменты, текст ответа) для подтверждённых человеком ответов и их искажений."""
+    rng = random.Random(42)
+    cases = {}
+    for key in keys:
+        if is_abstention(answers[key]) or labels[f"{key[0]}|{key[1]}"]["faithfulness"] < 4:
+            continue
+        variants = {ORIGINAL: answers[key], SWAPPED: perturbation.swap_value(answers[key], context_of(key), rng),
+                    CLAIMED: perturbation.add_invented_claim(answers[key], context_of(key), rng)}
+        cases |= {(key, kind): (gold_queries[key[1]], context_of(key), text)
+                  for kind, text in variants.items() if text is not None}
+    return cases
+
+
+def control_scores(cases, version: int) -> dict:
+    responses = parallel_map(lambda case: chat.complete(judge.judge_request("faithfulness", *cases[case], version)),
+                             list(cases))
+    return {case: judge.parse_verdict(r.content).score for case, r in zip(cases, responses, strict=True)}
+
+
+def control_summary(cases, scored) -> dict:
+    caught = {case: score is not None and score <= 3 for case, score in scored.items()}
+    by_kind = {kind: 100 * np.mean([caught[c] for c in cases if c[1] == kind]) for kind in (ORIGINAL, SWAPPED, CLAIMED)}
+    truth = [int(c[1] != ORIGINAL) for c in cases]
+    return {"ложная тревога на исходных, %": by_kind[ORIGINAL], f"поймано: {SWAPPED}, %": by_kind[SWAPPED],
+            f"поймано: {CLAIMED}, %": by_kind[CLAIMED],
+            "κ (метка, балл ≤ 3)": weighted_kappa(truth, [int(caught[c]) for c in cases], (0, 1))}
+
+
+control_dev = control_cases(annotation_keys, human)
+control_dev_scores = {version: control_scores(control_dev, version) for version in judge.PROMPTS}
+print("контроль dev:", pd.Series([kind for _, kind in control_dev]).value_counts().to_dict())
+pd.DataFrame({f"v{v}": control_summary(control_dev, control_dev_scores[v]) for v in judge.PROMPTS}).T.round(2)
+
+# %% [markdown]
+# ## 6. Валидация человеком: weighted Cohen's kappa
+#
+# Человек разметил ответы по тем же шкалам, не видя оценок судьи, конфигурации и эталона.
+#
+# - **dev** (30 ответов, `gold/kt5_human_labels.json`) — подбор версии судьи. Первый проход
+#   (`gold/kt5_human_labels_pass1.json`) сделан до того, как правила для отказа и «достоверность — только
+#   относительно фрагментов» вынесли на страницу разметки отдельным блоком; в нём отказы получали низкую
+#   достоверность вопреки шкале. Решения — по второму проходу, первый — для сравнения.
+# - **holdout** (20 других ответов, `gold/kt5_human_labels_holdout.json`) — размечен после того, как версия судьи
+#   заморожена; итоговая kappa и итоговый контроль достоверности — по нему.
+#
+# Kappa — с квадратичными весами (`stats.weighted_kappa`), ответы судьи не по формату исключаются из пары.
+# **Версия судьи** — среди прошедших порог детерминизма (≥ 85% по всем критериям, без ответов не по формату)
+# та, у которой выше средняя kappa на dev по трём критериям: релевантность и использование — против человека,
+# достоверность — против меток контрольной выборки dev (у человека на dev все пятёрки, и kappa с ним не определена
+# по смыслу).
+
+# %%
+def kappa(verdicts, labels, criterion: str, keys) -> float:
+    pairs = [(verdicts[(criterion, key)].score, labels[f"{key[0]}|{key[1]}"][criterion]) for key in keys]
     pairs = [(j, h) for j, h in pairs if j is not None]
     return weighted_kappa([j for j, _ in pairs], [h for _, h in pairs], judge.SCORES)
 
 
-kappas = pd.DataFrame({(f"v{version}", source): {c: kappa(first, labels, c) for c in judge.CRITERIA}
-                       for version, (first, _) in runs.items()
-                       for source, labels in (("проход 2", human), ("проход 1", human_pass1))}).T
-
-
-def closeness(verdicts, labels, tolerance: int) -> dict[str, float]:
+def closeness(verdicts, labels, keys, tolerance: int) -> dict[str, float]:
     """Доля ответов, где судья и человек разошлись не больше чем на `tolerance` баллов, %. Kappa при почти
     постоянной оценке одного из оценщиков ≈ 0 даже при почти полном совпадении — доли показывают это рядом."""
     return {c: 100 * np.mean([abs(verdicts[(c, key)].score - labels[f"{key[0]}|{key[1]}"][c]) <= tolerance
-                              for key in annotation_keys if verdicts[(c, key)].score is not None])
+                              for key in keys if verdicts[(c, key)].score is not None])
             for c in judge.CRITERIA}
 
 
-closeness_table = pd.DataFrame({(f"v{version}", what): closeness(first, human, tolerance)
-                                for version, (first, _) in runs.items()
-                                for what, tolerance in (("точно, %", 0), ("±1, %", 1))}).T
+kappas = pd.DataFrame({(f"v{version}", source): {c: kappa(first, labels, c, annotation_keys) for c in judge.CRITERIA}
+                       for version, (first, _) in runs.items()
+                       for source, labels in (("проход 2", human), ("проход 1", human_pass1))}).T
+selection = pd.DataFrame({f"v{v}": {"κ relevance": kappas.loc[(f"v{v}", "проход 2"), "relevance"],
+                                    "κ utilization": kappas.loc[(f"v{v}", "проход 2"), "utilization"],
+                                    "κ faithfulness (контроль)": control_summary(
+                                        control_dev, control_dev_scores[v])["κ (метка, балл ≤ 3)"]}
+                          for v in judge.PROMPTS}).T
+selection["среднее"] = selection.mean(axis=1)
 stable = [v for v in judge.PROMPTS if determinism.loc[f"v{v}", list(judge.CRITERIA)].min() >= 85
           and determinism.loc[f"v{v}", "ответов не по формату"] == 0]
-JUDGE_VERSION = max(stable, key=lambda v: kappas.loc[(f"v{v}", "проход 2")].mean())
-print("версия судьи для КТ 5:", f"v{JUDGE_VERSION}")
+JUDGE_VERSION = max(stable, key=lambda v: selection.loc[f"v{v}", "среднее"])
+print("прошли порог детерминизма:", [f"v{v}" for v in stable], "→ версия судьи для КТ 5:", f"v{JUDGE_VERSION}")
 display(kappas.round(3))
-closeness_table.round(1)
+selection.round(3)
+
+# %% [markdown]
+# ### Итоговая проверка замороженной версии на holdout
 
 # %%
-human_table = pd.DataFrame([human[f"{key[0]}|{key[1]}"] for key in annotation_keys])
-judge_table = pd.DataFrame([{c: runs[JUDGE_VERSION][0][(c, key)].score for c in judge.CRITERIA}
-                            for key in annotation_keys])
+holdout_cases = {key: (gold_queries[key[1]], context_of(key), answers[key]) for key in holdout_keys}
+holdout_verdicts = judge.judge_answers(chat, holdout_cases, JUDGE_VERSION)
+control_holdout = control_cases(holdout_keys, human_holdout)
+print("контроль holdout:", pd.Series([kind for _, kind in control_holdout]).value_counts().to_dict())
+holdout_table = pd.DataFrame({
+    "κ с человеком": {c: kappa(holdout_verdicts, human_holdout, c, holdout_keys) for c in judge.CRITERIA},
+    "точно, %": closeness(holdout_verdicts, human_holdout, holdout_keys, 0),
+    "±1, %": closeness(holdout_verdicts, human_holdout, holdout_keys, 1)})
+display(holdout_table.round(3))
+pd.Series(control_summary(control_holdout, control_scores(control_holdout, JUDGE_VERSION))).round(2).to_frame(
+    f"контроль достоверности, holdout, v{JUDGE_VERSION}")
+
+# %%
+human_table = pd.DataFrame([human_holdout[f"{key[0]}|{key[1]}"] for key in holdout_keys])
+judge_table = pd.DataFrame([{c: holdout_verdicts[(c, key)].score for c in judge.CRITERIA} for key in holdout_keys])
 display(pd.DataFrame({"человек": human_table.mean(), "судья": judge_table.mean()}).T.round(2))
-for criterion in judge.CRITERIA:  # матрица «человек × судья»: где именно расходятся
+for criterion in judge.CRITERIA:  # матрица «человек × судья» на holdout: где именно расходятся
     display(pd.crosstab(human_table[criterion], judge_table[criterion], rownames=[f"{criterion}: человек"],
                         colnames=["судья"]))
 
 # %% [markdown]
-# ## 6. Оценка всех ответов финальным судьёй
+# ## 7. Оценка всех ответов финальным судьёй
 #
 # 100 ответов (50 вопросов × 2 конфигурации) × 3 критерия. Отдельно — поведение на отказах: доля «не знаю»
 # на негативных (должна быть 100%) и ложные отказы на вопросах, у которых ответ есть.
@@ -276,7 +362,7 @@ abstentions = judged.assign(negative=judged["qtype"] == "negative").groupby(["co
 abstentions.round(1)
 
 # %% [markdown]
-# ## 7. Итоговая таблица
+# ## 8. Итоговая таблица
 #
 # Поиск — R@5 и NDCG@5 (как в КТ 3–4), генерация — средние баллы судьи, отказы — по всем 50 вопросам.
 # Задержка — медиана поиска (с реранкингом) и медиана ответа генератора по 50 вопросам.
@@ -298,7 +384,31 @@ summary = pd.DataFrame({
 summary.round(2)
 
 # %% [markdown]
-# ## 8. Выводы
+# ### Артефакты эксперимента и идентичность модели
+#
+# У DeepSeek нет неизменяемого ID версии модели: алиас `deepseek-flash` (DeepSeek-V4.1-Flash) обновляется
+# на сервере. Поэтому результаты, на которых построены выводы, сохраняются в git: ответы генератора
+# (`gold/kt5_answers.jsonl`) и все вердикты финального судьи (`gold/kt5_verdicts.jsonl`) — с `system_fingerprint`
+# и id ответа API там, где они записаны (поле появилось в кэше после генерации ответов и первых версий судьи).
+# Повторный запуск после обновления модели можно сравнить с этими файлами построчно.
+
+# %%
+atomic_write_jsonl(ROOT / "gold" / "kt5_answers.jsonl", [
+    {"config": name, "qid": qid, "answer": answers[(name, qid)], "context": contexts[name][qid],
+     "model": responses[(name, qid)].model or generation.MODEL, "fingerprint": responses[(name, qid)].fingerprint,
+     "response_id": responses[(name, qid)].response_id, "prompt_version": generation.PROMPT_VERSION}
+    for name, qid in answer_keys])
+atomic_write_jsonl(ROOT / "gold" / "kt5_verdicts.jsonl", [
+    {"config": key[0], "qid": key[1], "criterion": criterion, "judge_version": JUDGE_VERSION,
+     "score": verdict.score, "rationale": verdict.rationale, "fingerprint": verdict.fingerprint}
+    for (criterion, key), verdict in final.items()])
+fingerprints = pd.Series([r.fingerprint or "не записан" for r in responses.values()] +
+                         [v.fingerprint or "не записан" for v in final.values()],
+                         index=["генерация"] * len(responses) + ["судья"] * len(final))
+fingerprints.groupby(level=0).value_counts().rename("ответов API").to_frame()
+
+# %% [markdown]
+# ## 9. Выводы
 #
 # Метрики — validation (29 вопросов с доказательствами и 7 негативных), если не сказано иное.
 #
