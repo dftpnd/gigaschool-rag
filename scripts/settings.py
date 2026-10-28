@@ -18,3 +18,8 @@ CORPUS = DATA / "corpus.jsonl"
 SINCE_PATCH = "7.34"     # окно корпуса: с этого патча есть все четыре источника
 OFFTOPIC_SHARE = 0.2     # офтоп Telegram в доле от числа тематических постов
 SEED = 42
+
+# КТ 5: ручная разметка ответов
+ANNOTATION_SAMPLE = GOLD_DIR / "kt5_annotation_sample.json"  # пишет ноутбук kt5_generation
+HUMAN_LABELS = GOLD_DIR / "kt5_human_labels.json"
+ANNOTATION_HOST, ANNOTATION_PORT = "0.0.0.0", 8766  # все интерфейсы: разметка с другого устройства через VPN
