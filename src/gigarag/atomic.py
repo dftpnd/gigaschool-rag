@@ -1,8 +1,9 @@
 """Атомарная запись файлов: прерванная запись не оставляет повреждённого файла на итоговом пути."""
 
+import json
 import os
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 
 
@@ -26,6 +27,11 @@ def atomic_save[T](save: Callable[[T, Path], None], value: T, path: Path) -> Non
 
 def atomic_write_text(path: Path, text: str) -> None:
     atomic_save(lambda t, p: p.write_text(t, encoding="utf-8"), text, path)
+
+
+def atomic_write_jsonl(path: Path, rows: Iterable[Mapping]) -> None:
+    """Записи построчно в JSON Lines, ключи по алфавиту — диф между прогонами читается построчно."""
+    atomic_write_text(path, "".join(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n" for r in rows))
 
 
 def atomic_write_bytes(path: Path, payload: bytes) -> None:

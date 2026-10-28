@@ -41,3 +41,32 @@ def pareto_front(costs: Sequence[float], values: Sequence[float]) -> list[bool]:
     points = list(zip(costs, values, strict=True))
     return [not any(c <= cost and v >= value and (c, v) != (cost, value) for c, v in points)
             for cost, value in points]
+
+
+def weighted_kappa(first: Sequence[int], second: Sequence[int], categories: Sequence[int]) -> float:
+    """Weighted Cohen's kappa с квадратичными весами — согласие двух оценщиков на порядковой шкале:
+
+    κ_w = 1 − Σ w_ij · O_ij / Σ w_ij · E_ij,  w_ij = (i − j)² / (k − 1)²,
+
+    O — доли пар (оценка первого = i, второго = j), E — то же при независимости оценщиков (произведение
+    маргиналов), k — число категорий. Расхождение 1 против 5 штрафуется в 16 раз сильнее, чем 4 против 5.
+    Если оба ставят одну и ту же категорию всем, ожидаемое расхождение нулевое и κ не определена — NaN.
+    """
+    index = {c: i for i, c in enumerate(categories)}
+    k, n = len(categories), len(first)
+    observed = [[0.0] * k for _ in range(k)]
+    for a, b in zip(first, second, strict=True):
+        observed[index[a]][index[b]] += 1 / n
+    rows = [sum(row) for row in observed]
+    columns = [sum(observed[i][j] for i in range(k)) for j in range(k)]
+    weight = [[(i - j) ** 2 / (k - 1) ** 2 for j in range(k)] for i in range(k)]
+    disagreement = sum(weight[i][j] * observed[i][j] for i in range(k) for j in range(k))
+    expected = sum(weight[i][j] * rows[i] * columns[j] for i in range(k) for j in range(k))
+    return 1 - disagreement / expected if expected else float("nan")
+
+
+def within_tolerance(first: Sequence[int], second: Sequence[int], tolerance: int) -> float:
+    """Доля пар, разошедшихся не больше чем на `tolerance` баллов: Σ [|a_i − b_i| ≤ tolerance] / n.
+    Kappa при почти постоянной оценке одного из оценщиков ≈ 0 даже при почти полном совпадении — эта доля
+    показывает совпадение рядом с kappa."""
+    return sum(abs(a - b) <= tolerance for a, b in zip(first, second, strict=True)) / len(first) if first else 1.0

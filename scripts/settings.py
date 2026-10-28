@@ -18,3 +18,13 @@ CORPUS = DATA / "corpus.jsonl"
 SINCE_PATCH = "7.34"     # окно корпуса: с этого патча есть все четыре источника
 OFFTOPIC_SHARE = 0.2     # офтоп Telegram в доле от числа тематических постов
 SEED = 42
+
+# КТ 5: ручная разметка ответов
+# выборка → файл оценок; dev — подбор версии судьи, holdout — итоговая kappa. Выборки пишет ноутбук kt5_generation
+# в data/: в них тексты чанков корпуса (контент третьих сторон), а в git — только оценки по id ответа.
+KT5_DATA = DATA / "kt5"
+ANNOTATION_SETS = {
+    "dev": (KT5_DATA / "annotation_dev.json", GOLD_DIR / "kt5_labels_dev.json"),
+    "holdout": (KT5_DATA / "annotation_holdout.json", GOLD_DIR / "kt5_labels_holdout.json"),
+}
+ANNOTATION_HOST, ANNOTATION_PORT = "0.0.0.0", 8766  # все интерфейсы: разметка с другого устройства через VPN

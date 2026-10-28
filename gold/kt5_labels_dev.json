@@ -1,0 +1,182 @@
+{
+ "baseline retrieval|q01": {
+  "digest": "777a253eab91cbaadd8b0cfca35d75fbc32340c04446f33cf5c35b13f7a37932",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q04": {
+  "digest": "8b3def495023d4b05332f7918c194ef68a802fab3a7910e21f7c66475ae86ed9",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q05": {
+  "digest": "f0c71e84c5b4a7831006acb2897f28d3da8e44ca4061682fa014686e231b377a",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q08": {
+  "digest": "99dc0c593cd7df15c9ca5017340a9e553342ae6bcc0da00f69017effc25eaebd",
+  "faithfulness": 5,
+  "relevance": 4,
+  "utilization": 5
+ },
+ "baseline retrieval|q11": {
+  "digest": "31a8f19eac0e9ce2c106f837c2606e3bf824145069b7e325037cc1aff9780641",
+  "faithfulness": 5,
+  "relevance": 4,
+  "utilization": 5
+ },
+ "baseline retrieval|q12": {
+  "digest": "8ce8fdc0fcc468a61dade9d3d49a23a5f0ed1f14f3de55297a2b304733544e19",
+  "faithfulness": 5,
+  "relevance": 4,
+  "utilization": 5
+ },
+ "baseline retrieval|q14": {
+  "digest": "e64481e27fe73a8a9763d82107a61137eebe84bc20aba153789137930abb52f6",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q15": {
+  "digest": "f3c9628cc76b128f2de0faf2348b1ee44988d2a4f4f213fab742e586d84d0a38",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q18": {
+  "digest": "d8ef8b37ec0216d873070d3d6cc5db529c93d7d21958f8ae10c0fcf2d9710c37",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q22": {
+  "digest": "6c8db814b8df3e6a021de2f0164d43778759ecccd43aaaba4e9f43ca8dce3f80",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q26": {
+  "digest": "4f11c5c5201cc6071ae5d3ca2fb33ad8730e4b6c20ab13efee3a4a6190f21651",
+  "faithfulness": 5,
+  "relevance": 3,
+  "utilization": 5
+ },
+ "baseline retrieval|q29": {
+  "digest": "7b1e76e1265c5627159f465ab2497c64adc2d61aea695743d83d5052d5b06dae",
+  "faithfulness": 5,
+  "relevance": 3,
+  "utilization": 5
+ },
+ "baseline retrieval|q30": {
+  "digest": "5b34a671b3ca344de86dbafc0d74de5023d93351f8cde740e1f798d34798869c",
+  "faithfulness": 5,
+  "relevance": 3,
+  "utilization": 5
+ },
+ "baseline retrieval|q32": {
+  "digest": "2ff21aa9a25a7ece4fe47da8081178b88e915288bd2f2671a704fe448bf3a99e",
+  "faithfulness": 5,
+  "relevance": 3,
+  "utilization": 5
+ },
+ "baseline retrieval|q36": {
+  "digest": "44a3545028e1efdb96f1d25e84ae587829e77923b3294128cb29b901ba367fa8",
+  "faithfulness": 5,
+  "relevance": 4,
+  "utilization": 5
+ },
+ "baseline retrieval|q38": {
+  "digest": "798130aec03694739a3f603bc7965b28088799d034deeef6944a9fc8d6365da3",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q40": {
+  "digest": "c82bd7c1501e84e71e30f421aa83e3cf83f74bf69381cf23f13d03f8e7f8d6ea",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q44": {
+  "digest": "3d5424037878f08799b8bd84058dee91b218783d8d8d44a658e7177add59bec2",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q45": {
+  "digest": "c770d5f49886393c950e41df8941fa11c6964023b54e8ccad879360d4ba7b900",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q46": {
+  "digest": "88a77527d4a43f740b4379ab3f446d7893e61fa8a0b03ab86eaa80ce44537897",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q48": {
+  "digest": "45931baf9b313743a0d0afef551d47280336590f28123b3ba9548efda77155f1",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q50": {
+  "digest": "ba1694a3ec7c39dc1cbeddf6096cdc4983dd78a939387a9772190c4321336537",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "best retrieval|q17": {
+  "digest": "f9f2a25e2dfd103964deb89ec775457013dd22b00621f73de10b7a7051b42fe9",
+  "faithfulness": 4,
+  "relevance": 4,
+  "utilization": 5
+ },
+ "best retrieval|q20": {
+  "digest": "0fb800544fbc6b501b3654872fdfd86d35f22e38f033bcfc5dbc4798417a2134",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "best retrieval|q23": {
+  "digest": "12d06ef955b4f20df06b5589dda3338bc0dd39ff543a1b13a0937ac87747ecbf",
+  "faithfulness": 5,
+  "relevance": 4,
+  "utilization": 5
+ },
+ "best retrieval|q28": {
+  "digest": "7b9054f9ec7cfa9a3280e208905f552361be360322a8b703c0c57eacd99600fc",
+  "faithfulness": 5,
+  "relevance": 3,
+  "utilization": 4
+ },
+ "best retrieval|q31": {
+  "digest": "345faf86a91ceace01e0778ba2c21e4d9cd98128d20f68a4bf27d414ef8866ef",
+  "faithfulness": 5,
+  "relevance": 4,
+  "utilization": 5
+ },
+ "best retrieval|q35": {
+  "digest": "e19d3b5ad531c2f718dd66ffb7d0618a21c2c827638b5914a1683a2cd52fcd8a",
+  "faithfulness": 5,
+  "relevance": 4,
+  "utilization": 5
+ },
+ "best retrieval|q37": {
+  "digest": "966f160b054a613547d5061eeaa477bb25177c4bdb1f4482864b312301b2d6df",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "best retrieval|q39": {
+  "digest": "86899c7cc62d3bd34f871da5bff8344993f8f14d2a404907fe291a3db6cde1c9",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ }
+}
