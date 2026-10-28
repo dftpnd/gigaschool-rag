@@ -16,7 +16,7 @@ from settings import ANNOTATION_HOST, ANNOTATION_PORT, ANNOTATION_SETS
 
 SAMPLE, HUMAN_LABELS = ANNOTATION_SETS[sys.argv[1] if len(sys.argv) > 1 else "dev"]
 records = annotation.read_sample(SAMPLE)
-known_ids = {r["id"] for r in records}
+by_id = {r["id"]: r for r in records}
 page = annotation.page(records).encode()
 write_lock = Lock()
 
@@ -30,8 +30,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def reply_labels(self) -> None:
-        self.reply(200, json.dumps(annotation.read_labels(HUMAN_LABELS), ensure_ascii=False).encode(),
-                   "application/json; charset=utf-8")
+        valid = annotation.valid_labels(annotation.read_labels(HUMAN_LABELS), records)  # только для текущего текста
+        self.reply(200, json.dumps(valid, ensure_ascii=False).encode(), "application/json; charset=utf-8")
 
     def do_GET(self) -> None:
         if self.path == "/":  # продолжить с первого неразмеченного ответа
@@ -53,16 +53,16 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
         except json.JSONDecodeError:
             return self.reply(400, b"bad json", "text/plain")
-        if not isinstance(body, dict) or body.get("id") not in known_ids:
+        if not isinstance(body, dict) or body.get("id") not in by_id:
             return self.reply(400, b"unknown id", "text/plain")
         with write_lock:
             annotation.write_labels(HUMAN_LABELS, annotation.with_label(
-                annotation.read_labels(HUMAN_LABELS), body["id"], body.get("scores", {})))
+                annotation.read_labels(HUMAN_LABELS), by_id[body["id"]], body.get("scores", {})))
         self.reply_labels()
 
 
 def main() -> None:
-    done = sum(annotation.is_complete(annotation.read_labels(HUMAN_LABELS), r["id"]) for r in records)
+    done = sum(annotation.is_complete(annotation.read_labels(HUMAN_LABELS), r) for r in records)
     print(f"{len(records)} ответов, размечено {done}; http://{ANNOTATION_HOST}:{ANNOTATION_PORT}/")
     ThreadingHTTPServer((ANNOTATION_HOST, ANNOTATION_PORT), Handler).serve_forever()
 

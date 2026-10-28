@@ -2,9 +2,12 @@
 
 Разметчик видит ровно то, что видит судья (вопрос, фрагменты, ответ), и те же шкалы `judge.SCALES`;
 конфигурация поиска, эталон gold и оценки судьи на странице не показываются, чтобы не подсказывать.
-Оценки хранятся в `gold/` как {id ответа: {критерий: балл}} — их сравнивает с судьёй weighted kappa.
+Оценки хранятся в `gold/` как {id ответа: {критерий: балл, "digest": хэш содержимого}}: id — только `config|qid`,
+а хэш вопроса, фрагментов и ответа привязывает оценку к тому тексту, который видел разметчик. Если ответ
+перегенерирован и изменился, оценка с тем же id считается недействительной.
 """
 
+import hashlib
 import html
 import json
 from collections.abc import Mapping, Sequence
@@ -13,7 +16,14 @@ from pathlib import Path
 from gigarag.atomic import atomic_write_text
 from gigarag.judge import CRITERIA, SCALES, SCORES
 
-Labels = dict[str, dict[str, int]]
+Labels = dict[str, dict]  # id → {критерий: балл, "digest": хэш содержимого}
+DIGEST = "digest"
+
+
+def content_digest(record: Mapping) -> str:
+    """sha256 того, что видит разметчик: вопрос, фрагменты по порядку и ответ."""
+    payload = json.dumps([record["question"], list(record["passages"]), record["answer"]], ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def write_sample(path: Path, records: Sequence[Mapping]) -> None:
@@ -34,17 +44,33 @@ def read_labels(path: Path) -> Labels:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
-def with_label(labels: Labels, record_id: str, scores: Mapping) -> Labels:
-    """Новые оценки ответа поверх старых; входной словарь не меняется."""
-    return {**labels, record_id: {**labels.get(record_id, {}), **clean_scores(scores)}}
+def with_label(labels: Labels, record: Mapping, scores: Mapping) -> Labels:
+    """Новые оценки ответа поверх старых — если старые сделаны для того же содержимого; иначе старые
+    отбрасываются. Входной словарь не меняется."""
+    digest = content_digest(record)
+    previous = labels.get(record["id"], {})
+    kept = previous if previous.get(DIGEST) == digest else {}
+    return {**labels, record["id"]: {**kept, **clean_scores(scores), DIGEST: digest}}
 
 
 def write_labels(path: Path, labels: Labels) -> None:
     atomic_write_text(path, json.dumps(labels, ensure_ascii=False, indent=1, sort_keys=True))
 
 
-def is_complete(labels: Labels, record_id: str) -> bool:
-    return set(labels.get(record_id, {})) == set(CRITERIA)
+def valid_labels(labels: Labels, records: Sequence[Mapping]) -> dict[str, dict[str, int]]:
+    """Оценки ответов выборки, сделанные для их текущего содержимого: {id: {критерий: балл}}."""
+    return {r["id"]: clean_scores(labels[r["id"]]) for r in records
+            if labels.get(r["id"], {}).get(DIGEST) == content_digest(r)}
+
+
+def reuse_labels(pools: Sequence[Labels], records: Sequence[Mapping]) -> Labels:
+    """Оценки из прежних файлов разметки для ответов, содержимое которых не изменилось (тот же id и хэш)."""
+    return {r["id"]: pool[r["id"]] for pool in reversed(pools) for r in records
+            if pool.get(r["id"], {}).get(DIGEST) == content_digest(r)}
+
+
+def is_complete(labels: Labels, record: Mapping) -> bool:
+    return set(valid_labels(labels, [record]).get(record["id"], {})) == set(CRITERIA)
 
 
 def _scale_html(criterion: str) -> str:
@@ -57,7 +83,7 @@ def _scale_html(criterion: str) -> str:
 
 def first_unlabeled(records: Sequence[Mapping], labels: Labels) -> int:
     """Номер (с 1) первого ответа без всех трёх оценок; 1, если размечено всё."""
-    return next((n for n, r in enumerate(records, 1) if not is_complete(labels, r["id"])), 1)
+    return next((n for n, r in enumerate(records, 1) if not is_complete(labels, r)), 1)
 
 
 def page(records: Sequence[Mapping]) -> str:

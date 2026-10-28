@@ -1,0 +1,14 @@
+{
+ "baseline retrieval|q07": {
+  "digest": "db68357c7dfceb1c6efa3f49a01b8e963a0bea9cc73702f56a8ca2bc01e04601",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q49": {
+  "digest": "a603a9c5de0cfc26e98aca21edda3f851612dbae70c5c6682ea3f563657a4570",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ }
+}

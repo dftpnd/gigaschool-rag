@@ -1,0 +1,38 @@
+{
+ "baseline retrieval|q04": {
+  "digest": "8b3def495023d4b05332f7918c194ef68a802fab3a7910e21f7c66475ae86ed9",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q14": {
+  "digest": "e64481e27fe73a8a9763d82107a61137eebe84bc20aba153789137930abb52f6",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q45": {
+  "digest": "c770d5f49886393c950e41df8941fa11c6964023b54e8ccad879360d4ba7b900",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q46": {
+  "digest": "88a77527d4a43f740b4379ab3f446d7893e61fa8a0b03ab86eaa80ce44537897",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q48": {
+  "digest": "45931baf9b313743a0d0afef551d47280336590f28123b3ba9548efda77155f1",
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "best retrieval|q39": {
+  "digest": "86899c7cc62d3bd34f871da5bff8344993f8f14d2a404907fe291a3db6cde1c9",
+  "faithfulness": 5,
+  "relevance": 1,
+  "utilization": 1
+ }
+}

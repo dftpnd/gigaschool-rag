@@ -154,3 +154,35 @@ def test_detection_rates_and_kappa():
     assert result.rates == {"исходный": 0.5, "замена": 0.5, "факт": 0.5}
     perfect = perturbation.detection([("исходный", 5), ("замена", 3), ("факт", 1)], original="исходный")
     assert perfect.kappa == pytest.approx(1.0) and perfect.rates["исходный"] == 0
+
+
+# ---------- разметка: оценка привязана к содержимому ответа ----------
+
+RECORD = {"id": "best retrieval|q01", "question": "в?", "passages": ["ф1", "ф2"], "answer": "о"}
+
+
+def test_content_digest_changes_with_any_visible_part():
+    from gigarag import annotation
+    base = annotation.content_digest(RECORD)
+    for field, value in (("question", "в2?"), ("passages", ["ф2", "ф1"]), ("answer", "о2")):
+        assert annotation.content_digest({**RECORD, field: value}) != base
+    assert annotation.content_digest({**RECORD, "id": "другой"}) == base  # id не входит: только то, что видит человек
+
+
+def test_label_for_changed_answer_is_not_valid():
+    from gigarag import annotation
+    labels = annotation.with_label({}, RECORD, {"faithfulness": 5, "relevance": 4, "utilization": 3})
+    assert annotation.is_complete(labels, RECORD)
+    changed = {**RECORD, "answer": "перегенерирован"}
+    assert annotation.valid_labels(labels, [changed]) == {} and not annotation.is_complete(labels, changed)
+    # новая оценка для изменённого текста не смешивается со старыми баллами
+    relabeled = annotation.with_label(labels, changed, {"relevance": 1})
+    assert annotation.valid_labels(relabeled, [changed]) == {RECORD["id"]: {"relevance": 1}}
+
+
+def test_reuse_labels_only_for_unchanged_content():
+    from gigarag import annotation
+    old = annotation.with_label({}, RECORD, {"faithfulness": 5, "relevance": 5, "utilization": 5})
+    same, changed = RECORD, {**RECORD, "id": "baseline retrieval|q02", "answer": "x"}
+    other = annotation.with_label({}, {**changed, "answer": "y"}, {"relevance": 2})
+    assert set(annotation.reuse_labels([old, other], [same, changed])) == {RECORD["id"]}

@@ -24,7 +24,7 @@ SEED = 42
 # в data/: в них тексты чанков корпуса (контент третьих сторон), а в git — только оценки по id ответа.
 KT5_DATA = DATA / "kt5"
 ANNOTATION_SETS = {
-    "dev": (KT5_DATA / "annotation_dev.json", GOLD_DIR / "kt5_human_labels.json"),
-    "holdout": (KT5_DATA / "annotation_holdout.json", GOLD_DIR / "kt5_human_labels_holdout.json"),
+    "dev": (KT5_DATA / "annotation_dev.json", GOLD_DIR / "kt5_labels_dev.json"),
+    "holdout": (KT5_DATA / "annotation_holdout.json", GOLD_DIR / "kt5_labels_holdout.json"),
 }
 ANNOTATION_HOST, ANNOTATION_PORT = "0.0.0.0", 8766  # все интерфейсы: разметка с другого устройства через VPN

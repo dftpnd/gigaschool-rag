@@ -23,6 +23,10 @@ from gigarag.parallel import parallel_map
 CRITERIA = ("faithfulness", "relevance", "utilization")
 SCORES = (1, 2, 3, 4, 5)
 THINKING = False  # оценка — одно число и короткое обоснование
+# Достоверность сводится к бинарной метрике: контроль на искажениях проверяет только «есть ли неподтверждённое
+# утверждение» (балл ≤ 3 против ≥ 4), а калибровку шкалы 1–5 внутри ошибок не проверяет — среднее не публикуется.
+FAITHFUL_MIN = 4  # 4–5 — в ответе нет неподтверждённых и противоречащих фрагментам утверждений
+SCALED = ("relevance", "utilization")  # критерии, которые публикуются средним баллом 1–5
 
 _ROLE = """Ты — строгий эксперт, проверяющий ответы RAG-системы о балансе Dota 2. Тебе дадут вопрос игрока,
 пронумерованные фрагменты контекста, которые получила система, и её ответ. Оцени ответ по одному критерию."""
@@ -167,7 +171,10 @@ PROMPTS = {1: V1, 2: V2, 3: V3, 4: V4}
 class Verdict:
     score: int | None  # None — ответ судьи не по формату
     rationale: str
-    fingerprint: str = ""  # system_fingerprint ответа API; пустой для записей кэша, сделанных до появления поля
+    # идентичность ответа API (`llm.ChatResponse`); пустые для записей кэша, сделанных до появления полей
+    fingerprint: str = ""
+    model: str = ""
+    response_id: str = ""
 
 
 def judge_user(question: str, passages: Sequence[str], answer: str) -> str:
@@ -197,5 +204,5 @@ def judge_answers(chat, cases: Mapping[object, tuple[str, Sequence[str], str]],
     Каждый критерий — отдельный запрос; запросы идут параллельно, ответы кэшируются `chat`."""
     jobs = [(criterion, key) for key in cases for criterion in CRITERIA]
     responses = parallel_map(lambda job: chat.complete(judge_request(job[0], *cases[job[1]], version)), jobs)
-    return {job: replace(parse_verdict(r.content), fingerprint=r.fingerprint)
+    return {job: replace(parse_verdict(r.content), fingerprint=r.fingerprint, model=r.model, response_id=r.response_id)
             for job, r in zip(jobs, responses, strict=True)}
