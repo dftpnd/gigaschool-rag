@@ -131,18 +131,33 @@ function render() {
   $("dots").innerHTML = DATA.map((r, n) => `<div class="dot${done(r.id) ? " done" : ""}${n === i ? " cur" : ""}"` +
     ` data-n="${n}">${n + 1}</div>`).join("");
   document.querySelectorAll(".dot").forEach(d => d.onclick = () => { i = +d.dataset.n; render(); });
+  document.querySelectorAll(".crit input").forEach(el => el.onchange = async () => {
+    if (await post(checked())) { refreshProgress(); $("status").textContent = "Сохранено"; } });
   $("status").textContent = ""; window.scrollTo(0, 0);
 }
-async function save() {
-  const r = DATA[i]; const scores = {};
+function checked() {
+  const scores = {};
   for (const [c] of CRITERIA) { const el = document.querySelector(`input[name="${c}"]:checked`);
     if (el) scores[c] = +el.value; }
+  return scores;
+}
+async function post(scores) {
+  // каждая отмеченная оценка уходит на сервер сразу: переход к другому ответу ничего не теряет
+  try { const res = await fetch("labels", { method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ id: DATA[i].id, scores }) });
+    if (!res.ok) throw new Error(res.status); labels = await res.json(); return true;
+  } catch (e) { $("status").innerHTML = `<span class="err">Не сохранилось: ${e.message}</span>`; return false; }
+}
+function refreshProgress() {
+  const total = DATA.filter(r => done(r.id)).length;
+  $("progress").textContent = `размечено ${total} из ${DATA.length}`;
+  document.querySelectorAll(".dot").forEach(d => d.classList.toggle("done", done(DATA[+d.dataset.n].id)));
+}
+async function save() {
+  const scores = checked();
   if (Object.keys(scores).length < CRITERIA.length) {
     $("status").innerHTML = '<span class="err">Поставьте все три оценки</span>'; return; }
-  try { const res = await fetch("labels", { method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ id: r.id, scores }) });
-    if (!res.ok) throw new Error(res.status); labels = await res.json();
-  } catch (e) { $("status").innerHTML = `<span class="err">Не сохранилось: ${e.message}</span>`; return; }
+  if (!await post(scores)) return;
   const next = DATA.findIndex((r, n) => n > i && !done(r.id));
   i = next >= 0 ? next : Math.min(i + 1, DATA.length - 1); render();
   if (DATA.every(r => done(r.id))) $("status").textContent = "Все ответы размечены, оценки сохранены на сервере.";
