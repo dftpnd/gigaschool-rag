@@ -35,7 +35,7 @@ from gigarag.relevance import EvidenceChunks
 from gigarag.rerank import UNSEEN, reorder, rerank_by_scores
 from gigarag.retrieval import Bm25Index
 from gigarag.search import ranked_ids
-from gigarag.stats import agreement_rate
+from gigarag.stats import agreement_rate, pareto_front
 
 # ---------- операции над выдачей ----------
 
@@ -214,3 +214,9 @@ def test_threshold_curve():
 def test_agreement_rate():
     assert agreement_rate([1, 2, 2], [1, 2, 0]) == pytest.approx(2 / 3)
     assert agreement_rate([], []) == 1.0
+
+
+def test_pareto_front_keeps_only_undominated():
+    # (задержка, качество): вторая точка дороже и не лучше первой, у равных точек фронт общий
+    assert pareto_front([10, 20, 30, 30], [60, 60, 70, 70]) == [True, False, True, True]
+    assert pareto_front([], []) == []

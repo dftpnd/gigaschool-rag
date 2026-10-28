@@ -33,3 +33,11 @@ def share_percent(counts: pd.Series) -> pd.Series:
 def agreement_rate(first: Sequence, second: Sequence) -> float:
     """Доля совпавших ответов двух прогонов: Σ [a_i = b_i] / n — проверка детерминизма LLM при t = 0."""
     return sum(a == b for a, b in zip(first, second, strict=True)) / len(first) if first else 1.0
+
+
+def pareto_front(costs: Sequence[float], values: Sequence[float]) -> list[bool]:
+    """Отметки точек парето-фронта «меньше стоимость — больше качество»: точка i на фронте, если нет j
+    с costs_j ≤ costs_i и values_j ≥ values_i, где хотя бы одно неравенство строгое."""
+    points = list(zip(costs, values, strict=True))
+    return [not any(c <= cost and v >= value and (c, v) != (cost, value) for c, v in points)
+            for cost, value in points]

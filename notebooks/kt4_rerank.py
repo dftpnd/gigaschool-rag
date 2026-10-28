@@ -58,7 +58,7 @@ from gigarag.relevance import build_qrels
 from gigarag.rerank import CrossEncoderReranker, CrossEncoderSpec, load_cross_encoder
 from gigarag.retrieval import Bm25Index
 from gigarag.search import ranked_ids
-from gigarag.stats import agreement_rate
+from gigarag.stats import agreement_rate, pareto_front
 
 pd.set_option("display.max_colwidth", 120)
 pd.set_option("display.width", 220)
@@ -323,9 +323,17 @@ axes[1].legend(fontsize=8)
 plt.tight_layout()
 test_curve = metrics.threshold_curve(ce_rankings, qrels, [i for i in items if i.split == "test"],
                                      [thresholds.min(), best_threshold])
+
+
+def as_percent(table: pd.DataFrame) -> pd.DataFrame:
+    """Доли — в проценты; среднее число чанков остаётся числом."""
+    shares = ["precision", "recall", "F1", "негативные без контекста"]
+    return table.set_index("порог").assign(**{c: table.set_index("порог")[c] * 100 for c in shares}).round(1)
+
+
 print(f"лучший порог по F1 на validation: {best_threshold:.4f}")
-display(curve.set_index("порог").loc[[thresholds.min(), best_threshold]].mul(100).round(1))
-test_curve.set_index("порог").mul(100).round(1)
+display(as_percent(curve).loc[[thresholds.min(), best_threshold]].rename_axis("порог, validation"))
+as_percent(test_curve).rename_axis("порог, test")
 
 # %% [markdown]
 # ## 4. LLM как реранкер
@@ -468,18 +476,27 @@ pd.Series({ladder[name]: bottleneck(stage_profile(list(configs[name].values())))
 # %% [markdown]
 # ## 7. Задержка против Recall@5
 #
-# Все конфигурации КТ 4, кроме итераций промпта listwise (раздел 4). Ось X — медиана end-to-end задержки
-# (логарифмическая: от десятков миллисекунд до секунд LLM), Y — R@5 на validation.
+# Все конфигурации КТ 4, кроме итераций промпта listwise (раздел 4) и повтора «CE bge-reranker-v2-m3, пул 50»
+# (это та же конфигурация, что «CE поверх hybrid, пул 50»). Ось X — медиана end-to-end задержки (логарифмическая:
+# от миллисекунд до секунд LLM), Y — R@5 на validation. Подписаны ступени итоговой таблицы (крупные точки)
+# и парето-фронт (пунктир): конфигурации, которые никто не обходит одновременно по задержке и R@5.
 
 # %%
-all_names = [n for n in configs if n not in iteration_names]
+repeated = {f"+ CE {best_ce}, пул {SELECTION_POOL}"} if ce_pool == SELECTION_POOL else set()
+all_names = [n for n in configs if n not in {*iteration_names, *repeated}]
 tradeoff = summary(all_names, columns=["R@5", "NDCG@5"]).join(pd.DataFrame([latency(n) for n in all_names]))
+tradeoff["парето"] = pareto_front(tradeoff["медиана, мс"].tolist(), tradeoff["R@5"].tolist())
 fig, ax = plt.subplots(figsize=(9, 5.5))
 families = {"CE": "tab:blue", "LLM": "tab:red", "multi-query": "tab:green"}
 for name, row in tradeoff.iterrows():
     color = next((c for key, c in families.items() if key in name), "black")
-    ax.scatter(row["медиана, мс"], row["R@5"], color=color, s=60 if name in ladder else 25)
-    ax.annotate(name, (row["медиана, мс"], row["R@5"]), fontsize=7, xytext=(4, 2), textcoords="offset points")
+    ax.scatter(row["медиана, мс"], row["R@5"], color=color, s=60 if name in ladder else 20,
+               alpha=1 if name in ladder or row["парето"] else 0.5)
+    if name in ladder or row["парето"]:
+        ax.annotate(ladder.get(name, name), (row["медиана, мс"], row["R@5"]), fontsize=7, xytext=(4, 3),
+                    textcoords="offset points")
+front = tradeoff[tradeoff["парето"]].sort_values("медиана, мс")
+ax.step(front["медиана, мс"], front["R@5"], where="post", color="grey", linestyle=":", linewidth=1)
 ax.set_xscale("log")
 ax.set_xlabel("медиана задержки запроса, мс (лог. шкала)")
 ax.set_ylabel("R@5, validation, %")
@@ -502,4 +519,35 @@ final_table.round(1)
 # %% [markdown]
 # ## 9. Выводы и выбор конфигурации для КТ 5
 #
-# Заполняются по цифрам исполненного ноутбука.
+# Метрики — validation (29 вопросов с доказательствами, один вопрос — 3,4 п. п. R@5); test (11 вопросов,
+# один — 9 п. п.) — для контроля, решения по нему не принимаются.
+#
+# **Multi-query + RRF.** R@5 66,0 → 68,0, NDCG@5 60,2 → 61,3: лучше у 2 вопросов, хуже у 1 — в пределах шума.
+# Помогает фактическим (R@5 89,4 → 93,9) и немного составным (76,4 → 78,2), абстрактным вредит (NDCG@5
+# 34,2 → 28,4): переформулировки сужают размытый вопрос. Цена — +1,4 с (генерация 1,3 с), 486 токенов
+# и $0,22 на 1000 запросов. Сам по себе не окупается; оправдан, когда бюджет задержки ≥ 2,5 с и важнее всего
+# составные вопросы: в паре с LLM-реранкером составные R@5 78,2 → 81,2.
+#
+# **Cross-encoder.** Английский `ms-marco-MiniLM` и многоязычный `mmarco-mMiniLMv2` портят выдачу (R@5 38,2
+# и 54,0 против 66,0); `bge-reranker-v2-m3` — на уровне baseline (65,7). Фактическим он помогает (89,4 → 97,0),
+# составным вредит (76,4 → 69,8): пары «вопрос — чанк» оцениваются по отдельности, и топ-5 собирается вокруг
+# одной части вопроса. Поверх dense реранкер растёт с пулом (60,5 / 66,0 / 66,4 при 20 / 50 / 100) и догоняет
+# hybrid, поверх hybrid прироста нет (65,5 / 65,7 / 65,0); время растёт линейно, ≈ 4,2 мс на кандидата.
+# Порог 0,418 поднимает precision 31,7 → 43,0 при recall 65,7 → 60,5 и оставляет пустой контекст у 86%
+# негативных — это сигнал «не знаю» для КТ 5, а не способ поднять R@5.
+#
+# **LLM-реранкер.** Listwise растёт с пулом и к 20 не выходит на плато: R@5 66,0 / 68,4 / 71,8, NDCG@5
+# 62,4 / 65,5 / 67,4 при пуле 5 / 10 / 20. Задержка растёт медленно (1,0 → 1,25 с: ответ короткий,
+# растёт только вход), стоимость — линейно ($0,43 → $1,41 на 1000). Pointwise с пулом 10 даёт тот же R@5 при
+# худшем NDCG@5 (63,9 против 65,5) и вдвое большей стоимости. Главный выигрыш — абстрактные вопросы:
+# R@5 12,9 → 22,4. Детерминизм: полная сортировка (v1) повторялась в 60% случаев; оценки 0–2 всей пачке (v2) —
+# 100% и по порядку, и по топ-5, при том же качестве.
+#
+# **Bottleneck:** в baseline — BM25 (39 из 48 мс), с cross-encoder — реранкинг (212 из 270 мс), с LLM —
+# вызов LLM (1,2 из 1,25 с), в комбинациях с multi-query — генерация переформулировок (1,3 с).
+#
+# **Выбор для КТ 5 — baseline + LLM listwise v2, пул 20.** На графике это колено парето-фронта: +5,8 п. п. R@5
+# и +7,2 п. п. NDCG@5 за +1,2 с. Следующая точка фронта — multi-query + LLM — добавляет 1,1 п. п. R@5 (меньше
+# одного вопроса) и ничего по NDCG@5 за ещё 1,4 с. Из cross-encoder на фронт попадает только пул 100 поверх
+# dense — +0,4 п. п. R@5 к baseline за +0,4 с. На test multi-query + LLM выглядит лучше (R@5 74,1 против
+# 68,2) — если в КТ 5 составные вопросы окажутся главной потерей, это первая конфигурация для проверки.
