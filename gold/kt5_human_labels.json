@@ -1,1 +1,152 @@
-{}
+{
+ "baseline retrieval|q01": {
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q04": {
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q05": {
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q12": {
+  "faithfulness": 5,
+  "relevance": 4,
+  "utilization": 5
+ },
+ "baseline retrieval|q14": {
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q15": {
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q18": {
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q26": {
+  "faithfulness": 5,
+  "relevance": 3,
+  "utilization": 5
+ },
+ "baseline retrieval|q28": {
+  "faithfulness": 5,
+  "relevance": 3,
+  "utilization": 5
+ },
+ "baseline retrieval|q29": {
+  "faithfulness": 5,
+  "relevance": 3,
+  "utilization": 5
+ },
+ "baseline retrieval|q30": {
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "baseline retrieval|q32": {
+  "faithfulness": 5,
+  "relevance": 3,
+  "utilization": 5
+ },
+ "baseline retrieval|q36": {
+  "faithfulness": 5,
+  "relevance": 1,
+  "utilization": 1
+ },
+ "best retrieval|q04": {
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "best retrieval|q05": {
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "best retrieval|q08": {
+  "faithfulness": 5,
+  "relevance": 4,
+  "utilization": 5
+ },
+ "best retrieval|q15": {
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "best retrieval|q20": {
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "best retrieval|q22": {
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "best retrieval|q26": {
+  "faithfulness": 5,
+  "relevance": 3,
+  "utilization": 5
+ },
+ "best retrieval|q28": {
+  "faithfulness": 5,
+  "relevance": 3,
+  "utilization": 4
+ },
+ "best retrieval|q32": {
+  "faithfulness": 5,
+  "relevance": 3,
+  "utilization": 4
+ },
+ "best retrieval|q35": {
+  "faithfulness": 5,
+  "relevance": 4,
+  "utilization": 5
+ },
+ "best retrieval|q37": {
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "best retrieval|q39": {
+  "faithfulness": 5,
+  "relevance": 1,
+  "utilization": 1
+ },
+ "best retrieval|q40": {
+  "faithfulness": 5,
+  "relevance": 1,
+  "utilization": 1
+ },
+ "best retrieval|q44": {
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "best retrieval|q45": {
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "best retrieval|q46": {
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ },
+ "best retrieval|q48": {
+  "faithfulness": 5,
+  "relevance": 5,
+  "utilization": 5
+ }
+}

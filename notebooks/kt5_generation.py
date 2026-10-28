@@ -225,11 +225,25 @@ def kappa(verdicts, labels, criterion: str) -> float:
 kappas = pd.DataFrame({(f"v{version}", source): {c: kappa(first, labels, c) for c in judge.CRITERIA}
                        for version, (first, _) in runs.items()
                        for source, labels in (("проход 2", human), ("проход 1", human_pass1))}).T
+
+
+def closeness(verdicts, labels, tolerance: int) -> dict[str, float]:
+    """Доля ответов, где судья и человек разошлись не больше чем на `tolerance` баллов, %. Kappa при почти
+    постоянной оценке одного из оценщиков ≈ 0 даже при почти полном совпадении — доли показывают это рядом."""
+    return {c: 100 * np.mean([abs(verdicts[(c, key)].score - labels[f"{key[0]}|{key[1]}"][c]) <= tolerance
+                              for key in annotation_keys if verdicts[(c, key)].score is not None])
+            for c in judge.CRITERIA}
+
+
+closeness_table = pd.DataFrame({(f"v{version}", what): closeness(first, human, tolerance)
+                                for version, (first, _) in runs.items()
+                                for what, tolerance in (("точно, %", 0), ("±1, %", 1))}).T
 stable = [v for v in judge.PROMPTS if determinism.loc[f"v{v}", list(judge.CRITERIA)].min() >= 85
           and determinism.loc[f"v{v}", "ответов не по формату"] == 0]
 JUDGE_VERSION = max(stable, key=lambda v: kappas.loc[(f"v{v}", "проход 2")].mean())
 print("версия судьи для КТ 5:", f"v{JUDGE_VERSION}")
-kappas.round(3)
+display(kappas.round(3))
+closeness_table.round(1)
 
 # %%
 human_table = pd.DataFrame([human[f"{key[0]}|{key[1]}"] for key in annotation_keys])
