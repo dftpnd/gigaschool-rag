@@ -11,12 +11,14 @@
 Промпты прошли итерации (`PROMPTS`): версия задаёт тексты всех трёх критериев, разбор ответа общий.
 """
 
-from collections.abc import Sequence
+import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from gigarag.enrich import MODEL, SEED, TEMPERATURE
 from gigarag.generation import context_block
 from gigarag.llm import ChatRequest, chat_request, json_object_or_empty
+from gigarag.parallel import parallel_map
 
 CRITERIA = ("faithfulness", "relevance", "utilization")
 SCORES = (1, 2, 3, 4, 5)
@@ -106,7 +108,38 @@ _RULES_V2 = {
 V2 = {criterion: f"{_ROLE}\n\n{scale.text()}\n\n{_RULES_V2[criterion]}\n\n{_FORMAT_V2}"
       for criterion, scale in SCALES.items()}
 
-PROMPTS = {1: V1, 2: V2}
+# v3: свободный разбор v2 увеличил разброс (длинное рассуждение каждый раз уходит в другую сторону) — вместо него
+# короткие структурированные поля, из которых балл следует по тем же правилам.
+_FIELDS_V3 = {
+    "faithfulness": ('{"unsupported": [утверждения ответа, которых нет во фрагментах], '
+                     '"minor": [неточности пересказа, неверные ссылки [n], связки, которых нет во фрагментах], '
+                     '"score": 1|2|3|4|5}',
+                     "5 — оба списка пусты; 4 — пуст только unsupported; 3 — в unsupported одно-два утверждения, "
+                     "главный ответ подтверждён; 2 — неподтверждённых больше половины; 1 — главный ответ выдуман "
+                     "или противоречит фрагментам. Отказ («Не знаю…») — оба списка пусты, 5."),
+    "relevance": ('{"context_has_answer": "да"|"частично"|"нет", "parts": [{"part": часть вопроса, '
+                  '"answered": true|false}], "score": 1|2|3|4|5}',
+                  "part — что именно спрашивают (не больше трёх частей); answered — дан содержательный ответ, а не "
+                  "«информации нет» и не цитаты мимо вопроса. 5 — отвечены все части; 4 — все, но есть лишнее; "
+                  "3 — главная отвечена, другая нет; 2 — только второстепенные или ответ общий; 1 — ничего. "
+                  "Отказ: context_has_answer «нет» — 5, «да» или «частично» — 1."),
+    "utilization": ('{"needed": [факты из фрагментов, нужные для ответа на этот вопрос], '
+                    '"missing": [нужные факты, которых нет в ответе], "score": 1|2|3|4|5}',
+                    "needed — только то, о чём спрашивают, не всё о той же сущности (не больше пяти пунктов). "
+                    "5 — missing пуст или needed пуст; 4 — пропущена одна мелкая деталь; 3 — пропущено около "
+                    "половины; 2 — больше половины; 1 — использовано ничего из needed."),
+}
+
+V3 = {criterion: f"""{_ROLE}
+
+{scale.text()}
+
+Заполни поля коротко, без рассуждений вне полей, и поставь балл по правилу: {rule}
+Если колеблешься между двумя соседними баллами — ставь меньший.
+Ответ — строго JSON: {fields}"""
+      for criterion, scale in SCALES.items() for fields, rule in [_FIELDS_V3[criterion]]}
+
+PROMPTS = {1: V1, 2: V2, 3: V3}
 
 
 @dataclass(frozen=True)
@@ -129,6 +162,17 @@ def parse_verdict(content: str) -> Verdict:
     """Балл 1–5 и обоснование; нераспознанный балл — None (такой ответ не участвует в средних)."""
     verdict = json_object_or_empty(content)
     score = verdict.get("score")
-    rationale = verdict.get("rationale", verdict.get("analysis"))  # v1 — rationale, v2 — analysis
+    # обоснование: v1 — rationale, v2 — analysis, v3 — структурированные поля
+    rationale = verdict.get("rationale", verdict.get("analysis",
+                            json.dumps({k: v for k, v in verdict.items() if k != "score"}, ensure_ascii=False)))
     return Verdict(score if score in SCORES and not isinstance(score, bool) else None,
                    rationale if isinstance(rationale, str) else "")
+
+
+def judge_answers(chat, cases: Mapping[object, tuple[str, Sequence[str], str]],
+                  version: int) -> dict[tuple[str, object], Verdict]:
+    """Оценки всех случаев {ключ: (вопрос, фрагменты, ответ)} по всем критериям: (критерий, ключ) → вердикт.
+    Каждый критерий — отдельный запрос; запросы идут параллельно, ответы кэшируются `chat`."""
+    jobs = [(criterion, key) for key in cases for criterion in CRITERIA]
+    responses = parallel_map(lambda job: chat.complete(judge_request(job[0], *cases[job[1]], version)), jobs)
+    return {job: parse_verdict(r.content) for job, r in zip(jobs, responses, strict=True)}

@@ -38,7 +38,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from gigarag import annotation, baseline, generation, judge, metadata, tokens
+from gigarag import annotation, baseline, generation, judge, metadata, metrics, tokens
 from gigarag.cache import CacheStore, load_or_compute, read_npy, write_npy
 from gigarag.corpus import Document, read_jsonl
 from gigarag.embeddings import encode, load_sentence_model
@@ -50,7 +50,9 @@ from gigarag.llm_rerank import GRADES_PROMPT, ListwiseLlmReranker
 from gigarag.parallel import parallel_map
 from gigarag.patterns import is_abstention
 from gigarag.pipeline import HybridRetriever, Pipeline, run_all
+from gigarag.relevance import build_qrels
 from gigarag.retrieval import Bm25Index
+from gigarag.search import ranked_ids
 from gigarag.stats import agreement_rate, weighted_kappa
 
 pd.set_option("display.max_colwidth", 160)
@@ -148,3 +150,135 @@ annotation_records = [{"id": f"{name}|{qid}", "question": gold_queries[qid],
                       for name, qid in annotation_keys]
 annotation.write_sample(ROOT / "gold" / "kt5_annotation_sample.json", annotation_records)
 pd.Series([key[0] for key in annotation_keys]).value_counts().rename("ответов в выборке")
+
+# %% [markdown]
+# ## 4. LLM-судья: итерации промпта и детерминизм
+#
+# Каждая версия промпта (`judge.PROMPTS`) оценивает 30 ответов выборки разметки дважды при t = 0: второй прогон —
+# с отдельным кэшем (`llm_cache/kt5_repeat`), модель отвечает заново. Agreement — доля ответов с тем же баллом;
+# порог задания — 85%. Шкалы `judge.SCALES` во всех версиях одинаковые — те же, что видит человек.
+#
+# - **v1** — шкала и короткое обоснование перед баллом.
+# - **v2** — та же шкала, но сначала свободный разбор (части вопроса, утверждения, нужные факты) и правила подсчёта
+#   для пограничных случаев v1; при колебании — меньший балл.
+# - **v3** — вместо свободного разбора короткие структурированные поля (неподтверждённые утверждения, части вопроса
+#   с отметкой «отвечена», нужные и пропущенные факты, есть ли ответ в контексте) и балл по правилу из них.
+
+# %%
+annotation_cases = {key: (gold_queries[key[1]], context_of(key), answers[key]) for key in annotation_keys}
+runs = {version: (judge.judge_answers(chat, annotation_cases, version),
+                  judge.judge_answers(repeat_chat, annotation_cases, version)) for version in judge.PROMPTS}
+
+
+def scores(verdicts, criterion: str, keys) -> list:
+    return [verdicts[(criterion, key)].score for key in keys]
+
+
+determinism = pd.DataFrame({
+    f"v{version}": {**{criterion: 100 * agreement_rate(scores(first, criterion, annotation_keys),
+                                                       scores(second, criterion, annotation_keys))
+                       for criterion in judge.CRITERIA},
+                    "ответов не по формату": sum(v.score is None for run in (first, second) for v in run.values())}
+    for version, (first, second) in runs.items()}).T
+determinism.round(1)
+
+# %% [markdown]
+# ### Расхождения между прогонами
+#
+# Все пары, где два прогона одной версии поставили разный балл, — с обоснованиями обоих прогонов.
+
+# %%
+disagreements = pd.DataFrame([
+    {"версия": f"v{version}", "критерий": criterion, "ответ": f"{key[1]} ({key[0]})",
+     "баллы": f"{first[(criterion, key)].score} / {second[(criterion, key)].score}",
+     "прогон 1": first[(criterion, key)].rationale[:300], "прогон 2": second[(criterion, key)].rationale[:300]}
+    for version, (first, second) in runs.items() for criterion in judge.CRITERIA for key in annotation_keys
+    if first[(criterion, key)].score != second[(criterion, key)].score])
+print(disagreements.groupby(["версия", "критерий"]).size().unstack(fill_value=0))
+disagreements
+
+# %% [markdown]
+# ## 5. Валидация человеком: weighted Cohen's kappa
+#
+# Человек разметил те же 30 ответов по тем же шкалам (`gold/kt5_human_labels.json`), не видя оценок судьи,
+# конфигурации и эталона. Первый проход (`gold/kt5_human_labels_pass1.json`) сделан до того, как правила для
+# отказа и «достоверность — только относительно фрагментов» вынесли на страницу разметки отдельным блоком: в нём
+# отказы получали низкую достоверность вопреки шкале. Решения — по второму проходу, первый — для сравнения.
+#
+# Kappa — с квадратичными весами (`stats.weighted_kappa`), ответы судьи не по формату исключаются из пары.
+# Версия судьи для КТ 5 — среди прошедших порог детерминизма (≥ 85% по всем критериям, без ответов не по формату)
+# та, у которой выше средняя kappa по второму проходу. Kappa посчитана на тех же 30 ответах, по которым выбрана
+# версия, — это оптимистичная оценка.
+
+# %%
+human = annotation.read_labels(ROOT / "gold" / "kt5_human_labels.json")
+human_pass1 = annotation.read_labels(ROOT / "gold" / "kt5_human_labels_pass1.json")
+assert all(annotation.is_complete(human, r["id"]) for r in annotation_records), "разметка второго прохода неполная"
+
+
+def kappa(verdicts, labels, criterion: str) -> float:
+    pairs = [(verdicts[(criterion, key)].score, labels[f"{key[0]}|{key[1]}"][criterion]) for key in annotation_keys]
+    pairs = [(j, h) for j, h in pairs if j is not None]
+    return weighted_kappa([j for j, _ in pairs], [h for _, h in pairs], judge.SCORES)
+
+
+kappas = pd.DataFrame({(f"v{version}", source): {c: kappa(first, labels, c) for c in judge.CRITERIA}
+                       for version, (first, _) in runs.items()
+                       for source, labels in (("проход 2", human), ("проход 1", human_pass1))}).T
+stable = [v for v in judge.PROMPTS if determinism.loc[f"v{v}", list(judge.CRITERIA)].min() >= 85
+          and determinism.loc[f"v{v}", "ответов не по формату"] == 0]
+JUDGE_VERSION = max(stable, key=lambda v: kappas.loc[(f"v{v}", "проход 2")].mean())
+print("версия судьи для КТ 5:", f"v{JUDGE_VERSION}")
+kappas.round(3)
+
+# %%
+human_table = pd.DataFrame([human[f"{key[0]}|{key[1]}"] for key in annotation_keys])
+judge_table = pd.DataFrame([{c: runs[JUDGE_VERSION][0][(c, key)].score for c in judge.CRITERIA}
+                            for key in annotation_keys])
+display(pd.DataFrame({"человек": human_table.mean(), "судья": judge_table.mean()}).T.round(2))
+for criterion in judge.CRITERIA:  # матрица «человек × судья»: где именно расходятся
+    display(pd.crosstab(human_table[criterion], judge_table[criterion], rownames=[f"{criterion}: человек"],
+                        colnames=["судья"]))
+
+# %% [markdown]
+# ## 6. Оценка всех ответов финальным судьёй
+#
+# 100 ответов (50 вопросов × 2 конфигурации) × 3 критерия. Отдельно — поведение на отказах: доля «не знаю»
+# на негативных (должна быть 100%) и ложные отказы на вопросах, у которых ответ есть.
+
+# %%
+all_cases = {key: (gold_queries[key[1]], context_of(key), answers[key]) for key in answer_keys}
+final = judge.judge_answers(chat, all_cases, JUDGE_VERSION)
+judged = answer_table.assign(**{c: [final[(c, key)].score for key in answer_keys] for c in judge.CRITERIA})
+print("ответов судьи не по формату:", int(judged[list(judge.CRITERIA)].isna().sum().sum()))
+display(judged.groupby(["config", "split"], sort=False)[list(judge.CRITERIA)].mean().round(2))
+judged[judged["split"] == "validation"].pivot_table(index="config", columns="qtype", values=list(judge.CRITERIA),
+                                                    sort=False).round(2)
+
+# %%
+abstentions = judged.assign(negative=judged["qtype"] == "negative").groupby(["config", "negative"], sort=False)[
+    "отказ"].mean().mul(100).unstack().rename(columns={True: "отказ на негативных, %",
+                                                       False: "ложный отказ на остальных, %"})
+abstentions.round(1)
+
+# %% [markdown]
+# ## 7. Итоговая таблица
+#
+# Поиск — R@5 и NDCG@5 (как в КТ 3–4), генерация — средние баллы судьи, отказы — по всем 50 вопросам.
+# Задержка — медиана поиска (с реранкингом) и медиана ответа генератора по 50 вопросам.
+
+# %%
+qrels = build_qrels(items, corpus.chunks, corpus.clean.aliases)
+retrieval = pd.concat([metrics.per_question({qid: ranked_ids(t.ranking) for qid, t in traces[name].items()}, qrels,
+                                            items).assign(config=name) for name in (BASELINE, BEST)])
+summary = pd.DataFrame({
+    name: {
+        "R@5": 100 * retrieval.query("config == @name and split == 'validation'")["R@5"].mean(),
+        "NDCG@5": 100 * retrieval.query("config == @name and split == 'validation'")["NDCG@5"].mean(),
+        **{c: judged.query("config == @name and split == 'validation'")[c].mean() for c in judge.CRITERIA},
+        "отказ на негативных, %": abstentions.loc[name, "отказ на негативных, %"],
+        "ложный отказ, %": abstentions.loc[name, "ложный отказ на остальных, %"],
+        "поиск, мс (медиана)": 1000 * np.median([t.total_seconds for t in traces[name].values()]),
+        "генерация, мс (медиана)": 1000 * np.median([responses[(name, q)].seconds for q in gold_queries]),
+    } for name in (BASELINE, BEST)}).T
+summary.round(2)

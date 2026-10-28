@@ -70,3 +70,25 @@ def test_judge_request_is_one_criterion_per_call():
 ])
 def test_parse_verdict(content, score):
     assert judge.parse_verdict(content).score == score
+
+
+def test_judge_answers_one_request_per_criterion_and_case():
+    from gigarag.llm import ChatResponse
+
+    class FakeChat:
+        def __init__(self):
+            self.systems = []
+
+        def complete(self, request):
+            self.systems.append(request.messages[0][1])
+            return ChatResponse(json.dumps({"score": 4, "rationale": "ок"}), 1, 1)
+
+    chat = FakeChat()
+    verdicts = judge.judge_answers(chat, {"a": ("в?", ["ф"], "о"), "b": ("в2?", ["ф"], "о")}, 3)
+    assert len(chat.systems) == 6 and len(set(chat.systems)) == 3
+    assert verdicts[("relevance", "b")] == judge.Verdict(4, "ок")
+
+
+def test_v3_verdict_keeps_structured_fields_as_rationale():
+    verdict = judge.parse_verdict(json.dumps({"unsupported": [], "minor": ["ссылка"], "score": 4}, ensure_ascii=False))
+    assert verdict.score == 4 and "ссылка" in verdict.rationale
