@@ -7,6 +7,7 @@
 import hashlib
 import json
 import os
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -23,9 +24,13 @@ class ChatRequest:
     temperature: float
     seed: int | None = None
     json_mode: bool = False
+    thinking: bool | None = None  # скрытое рассуждение модели; None — по умолчанию провайдера, поле не отправляется
 
     def key(self) -> str:
-        return hashlib.sha256(json.dumps(asdict(self), ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        fields = asdict(self)
+        if self.thinking is None:
+            del fields["thinking"]  # ключи запросов без явного режима — те же, что до появления поля (кэши КТ 1–3)
+        return hashlib.sha256(json.dumps(fields, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
     def payload(self) -> dict:
         body = {"model": self.model, "temperature": self.temperature,
@@ -34,6 +39,8 @@ class ChatRequest:
             body["seed"] = self.seed
         if self.json_mode:
             body["response_format"] = {"type": "json_object"}
+        if self.thinking is not None:
+            body["thinking"] = {"type": "enabled" if self.thinking else "disabled"}  # формат DeepSeek V4
         return body
 
 
@@ -43,11 +50,12 @@ class ChatResponse:
     prompt_tokens: int
     completion_tokens: int
     cached: bool = False
+    seconds: float = 0.0  # время ответа API при первом запросе; из кэша возвращается сохранённое, а не время чтения
 
 
 def chat_request(model: str, system: str, user: str, temperature: float,
-                 seed: int | None = None, json_mode: bool = False) -> ChatRequest:
-    return ChatRequest(model, (("system", system), ("user", user)), temperature, seed, json_mode)
+                 seed: int | None = None, json_mode: bool = False, thinking: bool | None = None) -> ChatRequest:
+    return ChatRequest(model, (("system", system), ("user", user)), temperature, seed, json_mode, thinking)
 
 
 def read_env_file(path: Path) -> dict[str, str]:
@@ -78,12 +86,14 @@ class OpenAIChat:
                    base_url=env.get(f"{prefix}_BASE_URL", base_url or cls.base_url))
 
     def complete(self, request: ChatRequest) -> ChatResponse:
+        start = time.perf_counter()
         response = send_with_retries(
             lambda: self._client.post(f"{self.base_url}/chat/completions", json=request.payload()), self.retry)
+        seconds = time.perf_counter() - start  # с повторами после 429/5xx: столько ждёт пользователь
         body = response.json()
         usage = body.get("usage", {})
         return ChatResponse(body["choices"][0]["message"]["content"],
-                            usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0))
+                            usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0), seconds=seconds)
 
 
 @dataclass
@@ -106,6 +116,23 @@ class CachedChat:
 def parse_json_object(content: str) -> dict:
     """JSON-объект из ответа модели (в JSON-режиме ответ — ровно объект)."""
     return json.loads(content)
+
+
+def json_object_or_empty(content: str) -> dict:
+    """JSON-объект из ответа модели; пустой словарь, если ответ — не JSON или JSON, но не объект
+    (`[]`, `null`, число): разбор ответа LLM не должен ронять прогон."""
+    try:
+        value = json.loads(content)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def json_list_field(content: str, field: str) -> list | None:
+    """Список из поля JSON-объекта ответа; None, если ответ не объект, поля нет или в нём не список —
+    так пустой список модели («ничего не подходит») отличается от ответа не по формату."""
+    value = json_object_or_empty(content).get(field)
+    return value if isinstance(value, list) else None
 
 
 def is_json_object(content: str) -> bool:
