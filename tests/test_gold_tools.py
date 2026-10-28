@@ -1,3 +1,4 @@
+import hashlib
 import json
 from collections import Counter
 
@@ -124,6 +125,19 @@ def test_chat_request_key_and_payload():
     assert a.key() != chat_request("m", "sys", "user", 0.7, seed=1, json_mode=True).key()
     assert a.payload()["response_format"] == {"type": "json_object"}
     assert a.payload()["messages"][1] == {"role": "user", "content": "user"}
+    assert "thinking" not in a.payload()
+
+
+def test_chat_request_thinking_mode():
+    default = chat_request("m", "sys", "user", 0.0, seed=1)
+    off = chat_request("m", "sys", "user", 0.0, seed=1, thinking=False)
+    assert off.payload()["thinking"] == {"type": "disabled"}
+    assert chat_request("m", "sys", "user", 0.0, thinking=True).payload()["thinking"] == {"type": "enabled"}
+    assert off.key() != default.key()
+    # ключ запроса без явного режима не изменился с появлением поля: старые кэши остаются валидными
+    assert default.key() == hashlib.sha256(json.dumps(
+        {"model": "m", "messages": [["system", "sys"], ["user", "user"]], "temperature": 0.0, "seed": 1,
+         "json_mode": False}, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
 class FakeClient:

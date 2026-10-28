@@ -17,6 +17,7 @@ from gigarag.rerank import reorder
 from gigarag.retrieval import Ranking
 
 PROMPT_VERSION = 1
+THINKING = False  # с рассуждением deepseek-flash тратит 3–4 тыс. скрытых токенов на ответ из десятка номеров
 GRADES = (0, 1, 2)
 
 _TASK = """Ты оцениваешь фрагменты из базы материалов о балансе Dota 2 (патчноуты, статьи и комментарии dota2.ru,
@@ -44,12 +45,13 @@ def listwise_user(question: str, passages: Sequence[str]) -> str:
 
 
 def listwise_request(question: str, passages: Sequence[str]) -> ChatRequest:
-    return chat_request(MODEL, LISTWISE_SYSTEM, listwise_user(question, passages), TEMPERATURE, SEED, json_mode=True)
+    return chat_request(MODEL, LISTWISE_SYSTEM, listwise_user(question, passages), TEMPERATURE, SEED, json_mode=True,
+                        thinking=THINKING)
 
 
 def pointwise_request(question: str, passage: str) -> ChatRequest:
     return chat_request(MODEL, POINTWISE_SYSTEM, f"Вопрос: {question}\n\nФрагмент:\n{passage}", TEMPERATURE, SEED,
-                        json_mode=True)
+                        json_mode=True, thinking=THINKING)
 
 
 @dataclass(frozen=True)

@@ -15,6 +15,7 @@ from gigarag.pipeline import Expansion, LlmCall
 
 PARAPHRASES = 3
 PROMPT_VERSION = 1
+THINKING = False  # рассуждение deepseek-flash — тысячи скрытых выходных токенов на запрос, а ответ — три строки
 
 SYSTEM = f"""Ты переписываешь вопросы игроков Dota 2 в поисковые запросы к базе материалов о балансе игры:
 официальные патчноуты (на русском, с английскими названиями героев, предметов и способностей), статьи
@@ -34,7 +35,8 @@ SYSTEM = f"""Ты переписываешь вопросы игроков Dota 
 
 
 def expansion_request(question: str) -> ChatRequest:
-    return chat_request(MODEL, SYSTEM, question, TEMPERATURE, SEED, json_mode=True)
+    return chat_request(MODEL, SYSTEM, question, TEMPERATURE, SEED, json_mode=True,
+                        thinking=THINKING)
 
 
 def parse_queries(content: str) -> list[str]:

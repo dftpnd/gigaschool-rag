@@ -24,9 +24,13 @@ class ChatRequest:
     temperature: float
     seed: int | None = None
     json_mode: bool = False
+    thinking: bool | None = None  # скрытое рассуждение модели; None — по умолчанию провайдера, поле не отправляется
 
     def key(self) -> str:
-        return hashlib.sha256(json.dumps(asdict(self), ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        fields = asdict(self)
+        if self.thinking is None:
+            del fields["thinking"]  # ключи запросов без явного режима — те же, что до появления поля (кэши КТ 1–3)
+        return hashlib.sha256(json.dumps(fields, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
     def payload(self) -> dict:
         body = {"model": self.model, "temperature": self.temperature,
@@ -35,6 +39,8 @@ class ChatRequest:
             body["seed"] = self.seed
         if self.json_mode:
             body["response_format"] = {"type": "json_object"}
+        if self.thinking is not None:
+            body["thinking"] = {"type": "enabled" if self.thinking else "disabled"}  # формат DeepSeek V4
         return body
 
 
@@ -48,8 +54,8 @@ class ChatResponse:
 
 
 def chat_request(model: str, system: str, user: str, temperature: float,
-                 seed: int | None = None, json_mode: bool = False) -> ChatRequest:
-    return ChatRequest(model, (("system", system), ("user", user)), temperature, seed, json_mode)
+                 seed: int | None = None, json_mode: bool = False, thinking: bool | None = None) -> ChatRequest:
+    return ChatRequest(model, (("system", system), ("user", user)), temperature, seed, json_mode, thinking)
 
 
 def read_env_file(path: Path) -> dict[str, str]:
