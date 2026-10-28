@@ -118,6 +118,23 @@ def parse_json_object(content: str) -> dict:
     return json.loads(content)
 
 
+def json_object_or_empty(content: str) -> dict:
+    """JSON-объект из ответа модели; пустой словарь, если ответ — не JSON или JSON, но не объект
+    (`[]`, `null`, число): разбор ответа LLM не должен ронять прогон."""
+    try:
+        value = json.loads(content)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def json_list_field(content: str, field: str) -> list | None:
+    """Список из поля JSON-объекта ответа; None, если ответ не объект, поля нет или в нём не список —
+    так пустой список модели («ничего не подходит») отличается от ответа не по формату."""
+    value = json_object_or_empty(content).get(field)
+    return value if isinstance(value, list) else None
+
+
 def is_json_object(content: str) -> bool:
     """Разбирается ли ответ модели как JSON-объект: JSON-режим этого не гарантирует."""
     try:

@@ -223,6 +223,10 @@ print(f"\nзапросов без переформулировок (битый J
 #
 # Сравнение — пул 50 поверх baseline. Вход реранкера — вопрос и чанк с префиксом метаданных (номер патча часто
 # есть только в префиксе), не больше 512 токенов на пару, fp16 на GPU.
+#
+# Задание требует модель из `cross-encoder/*`, поэтому основной реранкер для пула, порога, dense/hybrid
+# и итоговой таблицы выбирается только среди них. `bge-reranker-v2-m3` — справочная планка: насколько лучше
+# реранкер вне этого namespace, он показан в сравнении моделей и отдельной строкой итоговой таблицы.
 
 # %%
 CROSS_ENCODERS = [
@@ -245,13 +249,16 @@ display(selection_table)
 by_type(selection)
 
 # %%
-best_ce = max((s.short_name for s in CROSS_ENCODERS),
+CROSS_ENCODER_NAMESPACE = "cross-encoder/"
+best_ce = max((s.short_name for s in CROSS_ENCODERS if s.name.startswith(CROSS_ENCODER_NAMESPACE)),
               key=lambda name: tuple(selection_table.loc[f"+ CE {name}, пул {SELECTION_POOL}", ["R@5", "NDCG@5"]]))
+REFERENCE_CE = next(f"+ CE {s.short_name}, пул {SELECTION_POOL}" for s in CROSS_ENCODERS
+                    if not s.name.startswith(CROSS_ENCODER_NAMESPACE))
 cross_encoder = cross_encoders[best_ce]
 for unused in set(cross_encoders) - {best_ce}:
     del cross_encoders[unused]
 torch.cuda.empty_cache()
-print("cross-encoder для остальных экспериментов (R@5, затем NDCG@5):", best_ce)
+print(f"cross-encoder для остальных экспериментов (среди {CROSS_ENCODER_NAMESPACE}*, R@5, затем NDCG@5):", best_ce)
 
 # %% [markdown]
 # ### Размер пула и поверх чего реранкить
@@ -301,13 +308,15 @@ by_type([BASELINE, CROSS_ENCODER])
 #
 # В контекст идут чанки топ-5 со score ≥ порога. Precision — доля релевантных среди оставленных, recall — R@5
 # после отсечения. Порог выбирается по F1 на validation; отдельно — доля негативных вопросов, у которых
-# не осталось ни одного чанка (генератор получит пустой контекст и ответит «не знаю»).
+# не осталось ни одного чанка (генератор получит пустой контекст и ответит «не знаю»). Сетка порогов —
+# квантили score только вопросов validation: test не влияет ни на сетку, ни на выбор, к нему применяется
+# уже выбранный порог.
 
 # %%
 ce_rankings = {qid: configs[CROSS_ENCODER][qid].ranking for qid in gold_queries}
-ce_scores = np.array([s for r in ce_rankings.values() for _, s in r[:metrics.CONTEXT_K]])
-thresholds = np.unique(np.round(np.quantile(ce_scores, np.linspace(0, 0.95, 39)), 4))
 validation_items = [i for i in items if i.split == "validation"]
+validation_scores = np.array([s for i in validation_items for _, s in ce_rankings[i.qid][:metrics.CONTEXT_K]])
+thresholds = np.unique(np.round(np.quantile(validation_scores, np.linspace(0, 0.95, 39)), 4))
 curve = metrics.threshold_curve(ce_rankings, qrels, validation_items, thresholds)
 best_threshold = float(curve.loc[curve["F1"].idxmax(), "порог"])
 fig, axes = plt.subplots(1, 2, figsize=(11, 3.6))
@@ -476,10 +485,11 @@ pd.Series({ladder[name]: bottleneck(stage_profile(list(configs[name].values())))
 # %% [markdown]
 # ## 7. Задержка против Recall@5
 #
-# Все конфигурации КТ 4, кроме итераций промпта listwise (раздел 4) и повтора «CE bge-reranker-v2-m3, пул 50»
-# (это та же конфигурация, что «CE поверх hybrid, пул 50»). Ось X — медиана end-to-end задержки (логарифмическая:
-# от миллисекунд до секунд LLM), Y — R@5 на validation. Подписаны ступени итоговой таблицы (крупные точки)
-# и парето-фронт (пунктир): конфигурации, которые никто не обходит одновременно по задержке и R@5.
+# Все конфигурации КТ 4, кроме итераций промпта listwise (раздел 4) и повтора выбранного cross-encoder
+# с пулом 50 из сравнения моделей (это та же конфигурация, что «CE поверх hybrid, пул 50»). Ось X — медиана
+# end-to-end задержки (логарифмическая: от миллисекунд до секунд LLM), Y — R@5 на validation. Подписаны ступени
+# итоговой таблицы (крупные точки) и парето-фронт (пунктир): конфигурации, которые никто не обходит
+# одновременно по задержке и R@5.
 
 # %%
 repeated = {f"+ CE {best_ce}, пул {SELECTION_POOL}"} if ce_pool == SELECTION_POOL else set()
@@ -507,13 +517,15 @@ tradeoff.sort_values("медиана, мс").round(1)
 # %% [markdown]
 # ## 8. Итоговая таблица
 #
-# Конфигурации в порядке усложнения. Метрики — validation, R@5 и NDCG@5 — ещё и на test. Задержка — медиана
-# и p95 end-to-end по 100 запросам; токены и стоимость — LLM-этапы на один запрос, по пиковому тарифу DeepSeek
-# (оценка сверху).
+# Конфигурации в порядке усложнения и справочная строка — cross-encoder вне `cross-encoder/*`. Метрики —
+# validation, R@5 и NDCG@5 — ещё и на test. Задержка — медиана и p95 end-to-end по 100 запросам; токены
+# и стоимость — LLM-этапы на один запрос, по пиковому тарифу DeepSeek (оценка сверху).
 
 # %%
-final_table = summary(list(ladder)).join(summary(list(ladder), "test", ["R@5", "NDCG@5"]).add_prefix("test ")).join(
-    pd.DataFrame([latency(n) for n in ladder])).rename(index=ladder)
+final_rows = {**ladder, REFERENCE_CE: f"справочно: + {REFERENCE_CE[2:]} (вне {CROSS_ENCODER_NAMESPACE}*)"}
+final_table = summary(list(final_rows)).join(
+    summary(list(final_rows), "test", ["R@5", "NDCG@5"]).add_prefix("test ")).join(
+    pd.DataFrame([latency(n) for n in final_rows])).rename(index=final_rows)
 final_table.round(1)
 
 # %% [markdown]

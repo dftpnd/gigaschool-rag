@@ -9,12 +9,11 @@ Listwise-промпт прошёл три итерации (`LISTWISE_PROMPTS`):
 по оценке и исходным порядком при равенстве убирают эти перестановки.
 """
 
-import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from gigarag.enrich import MODEL, SEED, TEMPERATURE
-from gigarag.llm import CachedChat, ChatRequest, ChatResponse, chat_request, parse_json_object
+from gigarag.llm import CachedChat, ChatRequest, ChatResponse, chat_request, json_list_field, json_object_or_empty
 from gigarag.parallel import parallel_map
 from gigarag.pipeline import LlmCall, Reranked
 from gigarag.rerank import reorder
@@ -70,15 +69,6 @@ class ParsedOrder:
     valid: bool       # модель ответила по формату без ошибок
 
 
-def _json_list(content: str, field: str) -> list:
-    """Список из поля JSON-ответа; пустой, если JSON битый или в поле не список."""
-    try:
-        value = parse_json_object(content).get(field, [])
-    except json.JSONDecodeError:
-        return []
-    return value if isinstance(value, list) else []
-
-
 def _positions(numbers: list, n: int) -> list[int]:
     """Номера фрагментов 1…n → позиции с нуля; чужие номера и повторы отбрасываются."""
     return list(dict.fromkeys(x - 1 for x in numbers if isinstance(x, int) and not isinstance(x, bool) and 1 <= x <= n))
@@ -92,7 +82,7 @@ def _with_rest(named: list[int], n: int) -> list[int]:
 
 def parse_order(content: str, n: int) -> ParsedOrder:
     """Порядок из ответа «отсортируй все» (v1); valid — модель вернула перестановку всех номеров."""
-    raw = _json_list(content, "ranking")
+    raw = json_list_field(content, "ranking") or []
     named = _positions(raw, n)
     return ParsedOrder(_with_rest(named, n), valid=len(raw) == len(named) == n)
 
@@ -100,7 +90,7 @@ def parse_order(content: str, n: int) -> ParsedOrder:
 def parse_listwise_grades(content: str, n: int) -> ParsedOrder:
     """Порядок из оценок 0–2 всей пачки (v2): по убыванию оценки, при равенстве — исходный порядок.
     Лишние оценки отбрасываются, недостающие и нераспознанные — нули."""
-    raw = _json_list(content, "grades")
+    raw = json_list_field(content, "grades") or []
     grades = [g if g in GRADES and not isinstance(g, bool) else None for g in raw[:n]]
     grades += [None] * (n - len(grades))
     return ParsedOrder(order_by_grades(grades), valid=len(raw) == n and None not in grades)
@@ -108,9 +98,9 @@ def parse_listwise_grades(content: str, n: int) -> ParsedOrder:
 
 def parse_top(content: str, n: int) -> ParsedOrder:
     """Порядок из ответа «выбери лучшие» (v3): названные — впереди, остальные — в исходном порядке."""
-    raw = _json_list(content, "top")
-    named = _positions(raw, n)
-    return ParsedOrder(_with_rest(named, n), valid=len(raw) == len(named) <= TOP)
+    raw = json_list_field(content, "top")
+    named = _positions(raw or [], n)
+    return ParsedOrder(_with_rest(named, n), valid=raw is not None and len(raw) == len(named) <= TOP)
 
 
 @dataclass(frozen=True)
@@ -139,10 +129,7 @@ def pointwise_request(question: str, passage: str) -> ChatRequest:
 
 def parse_grade(content: str) -> int | None:
     """Оценка 0–2 из ответа pointwise; None, если ответ не распознан."""
-    try:
-        grade = parse_json_object(content).get("grade")
-    except json.JSONDecodeError:
-        return None
+    grade = json_object_or_empty(content).get("grade")
     return grade if grade in GRADES and not isinstance(grade, bool) else None
 
 

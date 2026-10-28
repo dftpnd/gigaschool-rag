@@ -5,8 +5,9 @@ import numpy as np
 import pytest
 
 from gigarag import metrics
+from gigarag.enrich import parse_questions
 from gigarag.gold import GoldItem
-from gigarag.llm import CachedChat, ChatResponse, chat_request
+from gigarag.llm import CachedChat, ChatResponse, chat_request, json_list_field, json_object_or_empty
 from gigarag.llm_rerank import (
     GRADES_PROMPT,
     RANKING_PROMPT,
@@ -86,8 +87,9 @@ def test_parse_listwise_grades_orders_by_grade_then_original():
 def test_parse_top_puts_named_first():
     parsed = parse_top(json.dumps({"top": [3, 1]}), 4)
     assert parsed.order == [2, 0, 1, 3] and parsed.valid
-    assert parse_top(json.dumps({"top": []}), 2) == parse_top("не JSON", 2) == parse_top('{"top": "1"}', 2)
+    assert parse_top("не JSON", 2) == parse_top('{"top": "1"}', 2)
     assert parse_top(json.dumps({"top": []}), 2).order == [0, 1]
+    assert parse_top(json.dumps({"top": []}), 2).valid  # «полезных нет» — ответ по формату
     assert not parse_top(json.dumps({"top": [1, 1]}), 2).valid
 
 
@@ -220,3 +222,31 @@ def test_pareto_front_keeps_only_undominated():
     # (задержка, качество): вторая точка дороже и не лучше первой, у равных точек фронт общий
     assert pareto_front([10, 20, 30, 30], [60, 60, 70, 70]) == [True, False, True, True]
     assert pareto_front([], []) == []
+
+
+# валидный JSON, но не объект, и объект с не-списком в поле: разбор не падает, ответ считается ошибочным
+NOT_OBJECTS = ["[]", "null", "3", '"текст"', "[1, 2]"]
+
+
+@pytest.mark.parametrize("content", NOT_OBJECTS)
+def test_json_helpers_accept_non_object_answers(content):
+    assert json_object_or_empty(content) == {}
+    assert json_list_field(content, "ranking") is None
+    assert json_list_field('{"ranking": []}', "ranking") == []
+
+
+@pytest.mark.parametrize("content", [*NOT_OBJECTS, '{"ranking": null}', '{"grades": 2}', '{"top": {}}'])
+def test_listwise_parsers_survive_malformed_answers(content):
+    for parse in (parse_order, parse_listwise_grades, parse_top):
+        parsed = parse(content, 3)
+        assert parsed.order == [0, 1, 2] and not parsed.valid
+
+
+@pytest.mark.parametrize("content", [*NOT_OBJECTS, '{"grade": null}', '{"grade": [2]}'])
+def test_parse_grade_survives_malformed_answers(content):
+    assert parse_grade(content) is None
+
+
+@pytest.mark.parametrize("content", [*NOT_OBJECTS, '{"queries": null}', '{"queries": "a"}', '{"questions": 5}'])
+def test_question_parsers_survive_malformed_answers(content):
+    assert parse_queries(content) == [] and parse_questions(content) == []

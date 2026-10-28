@@ -6,11 +6,10 @@
 индексируются своим текстом в обоих вариантах.
 """
 
-import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from gigarag.llm import CachedChat, ChatRequest, ChatResponse, chat_request, parse_json_object
+from gigarag.llm import CachedChat, ChatRequest, ChatResponse, chat_request, json_list_field
 from gigarag.parallel import parallel_map
 
 # DeepSeek-V4.1-Flash: обработка ~20 тыс. чанков — массовая дешёвая задача, качество пересказа здесь
@@ -49,16 +48,13 @@ def questions_request(text: str) -> ChatRequest:
 
 
 def parse_questions(content: str) -> list[str]:
-    """Вопросы из ответа модели; пустой список, если JSON битый.
+    """Вопросы из ответа модели; пустой список, если JSON битый или не по формату.
 
     JSON-режим DeepSeek не гарантирует валидность (~0,6% ответов: оборванная строка, висячая запятая,
     неверный escape). Такой чанк индексируется своим текстом, как короткие, — повтор запроса с тем же seed
     вернул бы тот же ответ.
     """
-    try:
-        questions = parse_json_object(content).get("questions", [])
-    except json.JSONDecodeError:
-        return []
+    questions = json_list_field(content, "questions") or []
     return [q.strip() for q in questions if isinstance(q, str) and q.strip()]
 
 

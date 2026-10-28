@@ -7,10 +7,9 @@
 запрос на каждую часть. Исходный вопрос всегда ищется тоже: переформулировка может потерять деталь.
 """
 
-import json
 
 from gigarag.enrich import MODEL, SEED, TEMPERATURE
-from gigarag.llm import CachedChat, ChatRequest, chat_request, parse_json_object
+from gigarag.llm import CachedChat, ChatRequest, chat_request, json_list_field
 from gigarag.pipeline import Expansion, LlmCall
 
 PARAPHRASES = 3
@@ -40,11 +39,9 @@ def expansion_request(question: str) -> ChatRequest:
 
 
 def parse_queries(content: str) -> list[str]:
-    """Переформулировки из ответа модели; пустой список, если JSON битый (тогда ищется только исходный вопрос)."""
-    try:
-        queries = parse_json_object(content).get("queries", [])
-    except json.JSONDecodeError:
-        return []
+    """Переформулировки из ответа модели; пустой список, если ответ не по формату (тогда ищется только
+    исходный вопрос)."""
+    queries = json_list_field(content, "queries") or []
     return [q.strip() for q in queries if isinstance(q, str) and q.strip()]
 
 
