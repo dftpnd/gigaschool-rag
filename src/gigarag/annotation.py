@@ -55,8 +55,13 @@ def _scale_html(criterion: str) -> str:
             f"<ul>{levels}</ul><p>{html.escape(scale.abstention)}</p></details>")
 
 
+def first_unlabeled(records: Sequence[Mapping], labels: Labels) -> int:
+    """Номер (с 1) первого ответа без всех трёх оценок; 1, если размечено всё."""
+    return next((n for n, r in enumerate(records, 1) if not is_complete(labels, r["id"])), 1)
+
+
 def page(records: Sequence[Mapping]) -> str:
-    """Страница разметки: по одному ответу, три шкалы 1–5, сохранение на сервер по кнопке."""
+    """Страница разметки: один ответ на адрес /1 … /N, три шкалы 1–5; каждая оценка сохраняется сразу."""
     data = json.dumps([{"id": r["id"], "question": r["question"], "passages": r["passages"],
                         "answer": r["answer"]} for r in records], ensure_ascii=False).replace("</", "<\\/")
     # «</» внутри строк JSON закрыл бы <script> раньше времени, если в чанке встретится «</script>»
@@ -73,7 +78,7 @@ _PAGE = """<!doctype html>
 @media (prefers-color-scheme: dark) { :root { --bg:#161614; --fg:#ecebe4; --muted:#a09f97; --card:#20201d;
   --line:#3a3a35; --accent:#7cc39c; --warn:#e48b6f; } }
 body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui, sans-serif; }
-main { max-width: 900px; margin: 0 auto; padding: 16px; }
+main { max-width: 900px; margin: 0 auto; padding: 16px 16px 120px; }
 header { display:flex; gap:12px; align-items:center; flex-wrap:wrap; justify-content:space-between; }
 .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin:12px 0; }
 .q { font-size:18px; font-weight:600; }
@@ -81,18 +86,23 @@ header { display:flex; gap:12px; align-items:center; flex-wrap:wrap; justify-con
 .answer { white-space:pre-wrap; border-left:3px solid var(--accent); padding:4px 12px; }
 .crit { margin:14px 0; } .crit b { display:block; margin-bottom:6px; }
 .crit label { display:inline-block; margin-right:6px; }
-.crit input { display:none; }
-.crit span { display:inline-block; min-width:40px; text-align:center; padding:8px 0; border:1px solid var(--line);
-  border-radius:8px; cursor:pointer; }
+.crit input { position:absolute; opacity:0; width:1px; height:1px; }
+.crit span { display:inline-block; min-width:48px; text-align:center; padding:10px 0; border:1px solid var(--line);
+  border-radius:8px; cursor:pointer; font-size:18px; }
+.crit input:focus-visible + span { outline:2px solid var(--fg); }
 .crit input:checked + span { background:var(--accent); color:var(--bg); border-color:var(--accent); }
-button { font:inherit; padding:8px 16px; border-radius:8px; border:1px solid var(--line); background:var(--card);
-  color:var(--fg); cursor:pointer; }
-button.primary { background:var(--accent); color:var(--bg); border-color:var(--accent); }
-.muted { color:var(--muted); } .status { min-height:1.5em; } .err { color:var(--warn); }
-.dots { display:flex; flex-wrap:wrap; gap:4px; } .dot { width:22px; height:22px; border-radius:5px; font-size:11px;
-  display:flex; align-items:center; justify-content:center; border:1px solid var(--line); cursor:pointer; }
+.muted { color:var(--muted); } .err { color:var(--warn); } .ok { color:var(--accent); }
+.dots { display:flex; flex-wrap:wrap; gap:4px; } .dot { width:26px; height:26px; border-radius:5px; font-size:12px;
+  display:flex; align-items:center; justify-content:center; border:1px solid var(--line); color:var(--fg);
+  text-decoration:none; }
 .dot.done { background:var(--accent); color:var(--bg); } .dot.cur { outline:2px solid var(--fg); }
 details.scale { margin:6px 0; } details.scale ul { margin:4px 0; }
+nav.bar { position:fixed; left:0; right:0; bottom:0; background:var(--card); border-top:1px solid var(--line);
+  padding:10px 16px; display:flex; gap:10px; align-items:center; justify-content:center; flex-wrap:wrap; }
+nav.bar a { font-size:17px; padding:12px 22px; border-radius:10px; border:1px solid var(--line); color:var(--fg);
+  text-decoration:none; background:var(--bg); } nav.bar a.primary { background:var(--accent); color:var(--bg);
+  border-color:var(--accent); } nav.bar a.off { opacity:.35; pointer-events:none; }
+#status { min-width:12em; text-align:center; }
 </style></head><body><main>
 <header><h1 style="margin:8px 0">Разметка ответов</h1><span id="progress" class="muted"></span></header>
 <div class="dots" id="dots"></div>
@@ -103,66 +113,50 @@ details.scale { margin:6px 0; } details.scale ul { margin:4px 0; }
 <li><b>Ответ «Не знаю…»</b>: достоверность — 5 (ничего не утверждает). Релевантность и использование контекста —
 5 и 5, если ответа во фрагментах нет, и 1 и 1, если ответ во фрагментах есть.</li>
 <li>Ответил на часть вопроса и прямо сказал, какой части нет, — релевантность 3.</li>
+<li>Каждая оценка сохраняется сразу при клике; у каждого ответа свой адрес — его можно открыть снова.</li>
 </ul></div>
-<div class="card"><b>Шкалы</b> (те же, что у судьи)__SCALES__</div>
+<details class="card"><summary><b>Шкалы</b> (те же, что у судьи)</summary>__SCALES__</details>
 <div class="card"><div class="muted" id="pos"></div><p class="q" id="question"></p>
 <div><b>Ответ системы</b><div class="answer" id="answer"></div></div>
 <div id="form"></div>
-<div style="display:flex; gap:8px; flex-wrap:wrap"><button id="prev">← Назад</button>
-<button class="primary" id="save">Сохранить и дальше →</button></div>
-<p class="status" id="status"></p>
 <details open><summary><b>Фрагменты контекста</b></summary><div id="passages"></div></details></div>
-</main><script>
+</main>
+<nav class="bar"><a id="prev">← Назад</a><span id="status" class="muted"></span>
+<a id="next" class="primary">Дальше →</a></nav>
+<script>
 const DATA = __DATA__; const CRITERIA = __CRITERIA__;
-let labels = {}; let i = 0;
 const $ = id => document.getElementById(id);
+const n = Math.min(Math.max(parseInt(location.pathname.slice(1)) || 1, 1), DATA.length);
+const r = DATA[n - 1];
+let labels = {};
 function done(id) { return CRITERIA.every(([c]) => labels[id] && labels[id][c]); }
-function render() {
-  const r = DATA[i];
-  $("pos").textContent = `Ответ ${i + 1} из ${DATA.length}`;
-  $("question").textContent = r.question; $("answer").textContent = r.answer;
-  $("passages").innerHTML = ""; r.passages.forEach((p, n) => { const d = document.createElement("div");
-    d.className = "passage"; d.textContent = `[${n + 1}] ${p}`; $("passages").appendChild(d); });
+function progress() {
+  $("progress").textContent = `размечено ${DATA.filter(x => done(x.id)).length} из ${DATA.length}`;
+  $("dots").innerHTML = DATA.map((x, k) => `<a href="/${k + 1}" class="dot${done(x.id) ? " done" : ""}` +
+    `${k + 1 === n ? " cur" : ""}">${k + 1}</a>`).join("");
+  $("status").innerHTML = done(r.id) ? '<span class="ok">✓ все три оценки сохранены</span>'
+    : `<span class="muted">осталось оценок: ${CRITERIA.filter(([c]) => !(labels[r.id] || {})[c]).length}</span>`;
+}
+async function post(criterion, score) {
+  try { const res = await fetch("/labels", { method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ id: r.id, scores: { [criterion]: score } }) });
+    if (!res.ok) throw new Error(res.status); labels = await res.json(); progress();
+  } catch (e) { $("status").innerHTML = `<span class="err">Не сохранилось: ${e.message}</span>`; }
+}
+document.title = `Ответ ${n} из ${DATA.length} — разметка`;
+$("pos").textContent = `Ответ ${n} из ${DATA.length}`;
+$("question").textContent = r.question; $("answer").textContent = r.answer;
+r.passages.forEach((p, k) => { const d = document.createElement("div"); d.className = "passage";
+  d.textContent = `[${k + 1}] ${p}`; $("passages").appendChild(d); });
+$("prev").href = `/${n - 1}`; $("next").href = `/${n + 1}`;
+if (n === 1) $("prev").classList.add("off");
+if (n === DATA.length) $("next").classList.add("off");
+fetch("/labels").then(res => res.json()).then(l => {
+  labels = l; const mine = labels[r.id] || {};
   $("form").innerHTML = CRITERIA.map(([c, title]) => `<div class="crit"><b>${title}</b>` +
     [1, 2, 3, 4, 5].map(s => `<label><input type="radio" name="${c}" value="${s}"` +
-    ((labels[r.id] || {})[c] === s ? " checked" : "") + `><span>${s}</span></label>`).join("") + `</div>`).join("");
-  const total = DATA.filter(r => done(r.id)).length;
-  $("progress").textContent = `размечено ${total} из ${DATA.length}`;
-  $("dots").innerHTML = DATA.map((r, n) => `<div class="dot${done(r.id) ? " done" : ""}${n === i ? " cur" : ""}"` +
-    ` data-n="${n}">${n + 1}</div>`).join("");
-  document.querySelectorAll(".dot").forEach(d => d.onclick = () => { i = +d.dataset.n; render(); });
-  document.querySelectorAll(".crit input").forEach(el => el.onchange = async () => {
-    if (await post(checked())) { refreshProgress(); $("status").textContent = "Сохранено"; } });
-  $("status").textContent = ""; window.scrollTo(0, 0);
-}
-function checked() {
-  const scores = {};
-  for (const [c] of CRITERIA) { const el = document.querySelector(`input[name="${c}"]:checked`);
-    if (el) scores[c] = +el.value; }
-  return scores;
-}
-async function post(scores) {
-  // каждая отмеченная оценка уходит на сервер сразу: переход к другому ответу ничего не теряет
-  try { const res = await fetch("labels", { method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ id: DATA[i].id, scores }) });
-    if (!res.ok) throw new Error(res.status); labels = await res.json(); return true;
-  } catch (e) { $("status").innerHTML = `<span class="err">Не сохранилось: ${e.message}</span>`; return false; }
-}
-function refreshProgress() {
-  const total = DATA.filter(r => done(r.id)).length;
-  $("progress").textContent = `размечено ${total} из ${DATA.length}`;
-  document.querySelectorAll(".dot").forEach(d => d.classList.toggle("done", done(DATA[+d.dataset.n].id)));
-}
-async function save() {
-  const scores = checked();
-  if (Object.keys(scores).length < CRITERIA.length) {
-    $("status").innerHTML = '<span class="err">Поставьте все три оценки</span>'; return; }
-  if (!await post(scores)) return;
-  const next = DATA.findIndex((r, n) => n > i && !done(r.id));
-  i = next >= 0 ? next : Math.min(i + 1, DATA.length - 1); render();
-  if (DATA.every(r => done(r.id))) $("status").textContent = "Все ответы размечены, оценки сохранены на сервере.";
-}
-$("save").onclick = save; $("prev").onclick = () => { i = Math.max(0, i - 1); render(); };
-fetch("labels").then(r => r.json()).then(l => { labels = l; const first = DATA.findIndex(r => !done(r.id));
-  i = first >= 0 ? first : 0; render(); });
+    (mine[c] === s ? " checked" : "") + `><span>${s}</span></label>`).join("") + `</div>`).join("");
+  document.querySelectorAll(".crit input").forEach(el => el.onchange = () => post(el.name, +el.value));
+  progress();
+});
 </script></body></html>"""

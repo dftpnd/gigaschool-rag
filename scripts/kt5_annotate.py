@@ -32,7 +32,12 @@ class Handler(BaseHTTPRequestHandler):
                    "application/json; charset=utf-8")
 
     def do_GET(self) -> None:
-        if self.path == "/":
+        if self.path == "/":  # продолжить с первого неразмеченного ответа
+            self.send_response(302)
+            first = annotation.first_unlabeled(records, annotation.read_labels(HUMAN_LABELS))
+            self.send_header("Location", f"/{first}")
+            self.end_headers()
+        elif self.path.strip("/").isdigit() and 1 <= int(self.path.strip("/")) <= len(records):
             self.reply(200, page, "text/html; charset=utf-8")
         elif self.path == "/labels":
             self.reply_labels()
