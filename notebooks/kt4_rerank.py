@@ -331,18 +331,77 @@ test_curve.set_index("порог").mul(100).round(1)
 # ## 4. LLM как реранкер
 #
 # `deepseek-flash` (t = 0, seed 42, JSON). Основной формат — **listwise**: вопрос и N пронумерованных чанков
-# одним запросом, ответ — порядок номеров. Ошибки модели (повтор, выдуманный или пропущенный номер) чинятся:
-# пропущенные кандидаты дописываются в исходном порядке. Для сравнения — **pointwise**: каждый чанк отдельным
-# запросом с оценкой 0–2 (те же определения, что в разметке gold), N запросов идут параллельно, задержка этапа —
-# самый медленный из них.
+# одним запросом. Ошибки модели (повтор, выдуманный или пропущенный номер, лишняя оценка) чинятся: не названные
+# кандидаты остаются в исходном порядке. Для сравнения — **pointwise**: каждый чанк отдельным запросом с оценкой
+# 0–2 (те же определения, что в разметке gold), N запросов идут параллельно, задержка этапа — самый медленный
+# из них.
 #
-# Пул 5 / 10 / 20 поверх baseline. При пуле 5 набор топ-5 не меняется — меняется только порядок (NDCG, MRR).
+# ### Промпт listwise: итерации и детерминизм
+#
+# Детерминизм проверяется вторым прогоном тех же запросов с отдельным кэшем (`llm_cache/kt4_repeat`): модель
+# отвечает заново. 20 первых вопросов validation × пул 20 — самый длинный список, где порядок неустойчивее всего.
+# Совпадение — тот же порядок всего пула и тот же набор топ-5 (то, что уйдёт в контекст КТ 5). Порог задания — 90%.
+#
+# - **v1 — отсортировать все.** Первая версия: полный порядок пула совпал лишь в 60% повторов. Модель
+#   переставляет почти равные кандидаты — десятый и пятнадцатый чанки «по теме» ей неразличимы.
+# - **v2 — оценки 0–2 всей пачке.** Тот же запрос, но вместо порядка — оценка каждому чанку по шкале pointwise;
+#   сортировка по оценке, при равенстве — исходный порядок первичного поиска. Ничьи разрешает код, а не модель.
+# - **v3 — выбрать до 5 лучших.** Модель называет только верх, остальные — в исходном порядке.
+#
+# Правило выбора: среди версий с совпадением порядка ≥ 90% — лучшая по R@5, затем NDCG@5.
+
+# %%
+ITERATION_POOL = 20
+repeat_chat = CachedChat(chat.client, DATA / "llm_cache" / "kt4_repeat")
+probe = [i.qid for i in items if i.split == "validation"][:20]
+
+
+def listwise_orders(client: CachedChat, prompt: llm_rerank.ListwisePrompt, pool: int) -> list[tuple[int, ...]]:
+    """Порядок пула по каждому вопросу probe от одного прогона модели."""
+    return [tuple(prompt.parse(client.complete(llm_rerank.listwise_request(
+        gold_queries[qid], [passages[doc] for doc, _ in configs[BASELINE][qid].ranking[:pool]], prompt)).content,
+        pool).order) for qid in probe]
+
+
+def listwise_agreement(prompt: llm_rerank.ListwisePrompt, pool: int) -> pd.Series:
+    first, second = (listwise_orders(c, prompt, pool) for c in (chat, repeat_chat))
+    return pd.Series({"тот же порядок пула, %": agreement_rate(first, second),
+                      "тот же топ-5, %": agreement_rate([frozenset(o[:5]) for o in first],
+                                                       [frozenset(o[:5]) for o in second])}).mul(100)
+
+
+def invalid_answers(prompt: llm_rerank.ListwisePrompt, pool: int) -> int:
+    """Сколько из 100 ответов пришлось чинить (не по формату)."""
+    return sum(not prompt.parse(chat.complete(llm_rerank.listwise_request(
+        query, [passages[doc] for doc, _ in configs[BASELINE][key].ranking[:pool]], prompt)).content, pool).valid
+        for key, query in latency_queries.items())
+
+
+iteration_names = [f"+ LLM {p.name}, пул {ITERATION_POOL}" for p in llm_rerank.LISTWISE_PROMPTS]
+iteration_rows = []
+for prompt, name in zip(llm_rerank.LISTWISE_PROMPTS, iteration_names, strict=True):
+    run(name, Pipeline(retriever, encode_queries, rerank=ListwiseLlmReranker(chat, passages, ITERATION_POOL, prompt)))
+    iteration_rows.append(listwise_agreement(prompt, ITERATION_POOL).rename(name)
+                          .to_frame().T.assign(**{"ответов с ошибкой": invalid_answers(prompt, ITERATION_POOL)}))
+iterations = summary(iteration_names).join(pd.concat(iteration_rows)).join(
+    pd.DataFrame([latency(n) for n in iteration_names]))
+display(iterations.round(1))
+stable = [(p, n) for p, n in zip(llm_rerank.LISTWISE_PROMPTS, iteration_names, strict=True)
+          if iterations.loc[n, "тот же порядок пула, %"] >= 90]
+listwise_prompt = max(stable, key=lambda pn: tuple(iterations.loc[pn[1], ["R@5", "NDCG@5"]]))[0]
+print("промпт listwise для остальных экспериментов:", listwise_prompt.name)
+
+# %% [markdown]
+# ### Размер пула
+#
+# Пул 5 / 10 / 20 поверх baseline с выбранным промптом и pointwise с пулом 10. При пуле 5 набор топ-5
+# не меняется — меняется только порядок (NDCG, MRR).
 
 # %%
 LLM_POOLS = (5, 10, 20)
 for pool in LLM_POOLS:
     run(f"+ LLM listwise, пул {pool}",
-        Pipeline(retriever, encode_queries, rerank=ListwiseLlmReranker(chat, passages, pool)))
+        Pipeline(retriever, encode_queries, rerank=ListwiseLlmReranker(chat, passages, pool, listwise_prompt)))
 POINTWISE_POOL = 10
 run(f"+ LLM pointwise, пул {POINTWISE_POOL}",
     Pipeline(retriever, encode_queries, rerank=PointwiseLlmReranker(chat, passages, POINTWISE_POOL)))
@@ -352,40 +411,28 @@ display(llm_table)
 by_type(llm_names)
 
 # %%
-invalid = {pool: sum(not llm_rerank.parse_order(chat.complete(llm_rerank.listwise_request(
-    query, [passages[doc] for doc, _ in configs[BASELINE][key].ranking[:pool]])).content, pool).valid
-    for key, query in latency_queries.items()) for pool in LLM_POOLS}
-print("ответов listwise с ошибкой в номерах (исправлены):", invalid)
+print("ответов listwise с ошибкой (исправлены):", {pool: invalid_answers(listwise_prompt, pool) for pool in LLM_POOLS})
 llm_pool = int(max(LLM_POOLS, key=lambda p: tuple(llm_table.loc[f"+ LLM listwise, пул {p}", ["R@5", "NDCG@5"]])))
 LLM_RERANK = f"+ LLM listwise, пул {llm_pool}"
 print("пул LLM-реранкера (лучший R@5, затем NDCG@5):", llm_pool)
 
 # %% [markdown]
-# ### Детерминизм при t = 0
-#
-# Второй прогон тех же запросов — с отдельным кэшем (`llm_cache/kt4_repeat`), поэтому модель отвечает заново.
+# ### Детерминизм выбранных конфигураций
 #
 # - **pointwise**: 20 пар «вопрос — чанк» (первые 20 вопросов validation × первый кандидат baseline);
 #   совпадение — та же оценка;
-# - **listwise**: 20 вопросов validation × пул выбранного размера; совпадение — тот же порядок всего пула
-#   и тот же набор топ-5.
-#
-# Порог из задания — 90%.
+# - **listwise**: выбранный промпт и пул на тех же 20 вопросах.
 
 # %%
-repeat_chat = CachedChat(chat.client, DATA / "llm_cache" / "kt4_repeat")
-probe = [i.qid for i in items if i.split == "validation"][:20]
 pairs = [(gold_queries[qid], passages[configs[BASELINE][qid].ranking[0][0]]) for qid in probe]
 grades = [[llm_rerank.parse_grade(c.complete(llm_rerank.pointwise_request(q, p)).content) for q, p in pairs]
           for c in (chat, repeat_chat)]
-lists = [[llm_rerank.parse_order(c.complete(llm_rerank.listwise_request(
-    gold_queries[qid], [passages[doc] for doc, _ in configs[BASELINE][qid].ranking[:llm_pool]])).content,
-    llm_pool).order for qid in probe] for c in (chat, repeat_chat)]
+listwise_final = listwise_agreement(listwise_prompt, llm_pool)
 determinism = pd.Series({
-    "pointwise: та же оценка": agreement_rate(*grades),
-    "listwise: тот же порядок пула": agreement_rate(*([tuple(o) for o in run_orders] for run_orders in lists)),
-    "listwise: тот же топ-5": agreement_rate(*([frozenset(o[:5]) for o in run_orders] for run_orders in lists)),
-}).mul(100).round(1)
+    "pointwise: та же оценка": 100 * agreement_rate(*grades),
+    f"listwise ({listwise_prompt.name}, пул {llm_pool}): тот же порядок пула": listwise_final.iloc[0],
+    f"listwise ({listwise_prompt.name}, пул {llm_pool}): тот же топ-5": listwise_final.iloc[1],
+}).round(1)
 determinism.to_frame("agreement, %")
 
 # %% [markdown]
@@ -400,10 +447,10 @@ MULTI_QUERY_LLM = "+ multi-query + LLM-rerank"
 run(MULTI_QUERY_CE, Pipeline(retriever, encode_queries, expand=expand,
                              rerank=CrossEncoderReranker(cross_encoder, passages, ce_pool)))
 run(MULTI_QUERY_LLM, Pipeline(retriever, encode_queries, expand=expand,
-                              rerank=ListwiseLlmReranker(chat, passages, llm_pool)))
+                              rerank=ListwiseLlmReranker(chat, passages, llm_pool, listwise_prompt)))
 ladder = {BASELINE: "baseline (КТ 3)", MULTI_QUERY: "+ трансформация (multi-query)",
           CROSS_ENCODER: f"+ cross-encoder ({best_ce}, пул {ce_pool})",
-          LLM_RERANK: f"+ LLM-rerank (listwise, пул {llm_pool})",
+          LLM_RERANK: f"+ LLM-rerank (listwise {listwise_prompt.name[:2]}, пул {llm_pool})",
           MULTI_QUERY_CE: "+ трансформация + cross-encoder", MULTI_QUERY_LLM: "+ трансформация + LLM-rerank"}
 by_type(list(ladder))
 
@@ -421,11 +468,11 @@ pd.Series({ladder[name]: bottleneck(stage_profile(list(configs[name].values())))
 # %% [markdown]
 # ## 7. Задержка против Recall@5
 #
-# Все конфигурации КТ 4. Ось X — медиана end-to-end задержки (логарифмическая: от десятков миллисекунд
-# до секунд LLM), Y — R@5 на validation.
+# Все конфигурации КТ 4, кроме итераций промпта listwise (раздел 4). Ось X — медиана end-to-end задержки
+# (логарифмическая: от десятков миллисекунд до секунд LLM), Y — R@5 на validation.
 
 # %%
-all_names = list(configs)
+all_names = [n for n in configs if n not in iteration_names]
 tradeoff = summary(all_names, columns=["R@5", "NDCG@5"]).join(pd.DataFrame([latency(n) for n in all_names]))
 fig, ax = plt.subplots(figsize=(9, 5.5))
 families = {"CE": "tab:blue", "LLM": "tab:red", "multi-query": "tab:green"}

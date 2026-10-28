@@ -8,12 +8,16 @@ from gigarag import metrics
 from gigarag.gold import GoldItem
 from gigarag.llm import CachedChat, ChatResponse, chat_request
 from gigarag.llm_rerank import (
+    GRADES_PROMPT,
+    RANKING_PROMPT,
     ListwiseLlmReranker,
     PointwiseLlmReranker,
     call_of,
     order_by_grades,
     parse_grade,
+    parse_listwise_grades,
     parse_order,
+    parse_top,
 )
 from gigarag.pipeline import (
     DENSE,
@@ -69,6 +73,24 @@ def test_parse_order_repairs_model_mistakes():
     assert not parse_order(json.dumps({"ranking": [True, 1, 2]}), 2).valid
 
 
+def test_parse_listwise_grades_orders_by_grade_then_original():
+    parsed = parse_listwise_grades(json.dumps({"grades": [1, 0, 2, 1]}), 4)
+    assert parsed.order == [2, 0, 3, 1] and parsed.valid
+    # нехватка, лишние и нераспознанные оценки — нули, ответ помечается как ошибочный
+    assert parse_listwise_grades(json.dumps({"grades": [0, 2]}), 3) == parse_listwise_grades(
+        json.dumps({"grades": [0, 2, "x", 1]}), 3)
+    assert parse_listwise_grades(json.dumps({"grades": [0, 2]}), 3).order == [1, 0, 2]
+    assert not parse_listwise_grades("не JSON", 2).valid
+
+
+def test_parse_top_puts_named_first():
+    parsed = parse_top(json.dumps({"top": [3, 1]}), 4)
+    assert parsed.order == [2, 0, 1, 3] and parsed.valid
+    assert parse_top(json.dumps({"top": []}), 2) == parse_top("не JSON", 2) == parse_top('{"top": "1"}', 2)
+    assert parse_top(json.dumps({"top": []}), 2).order == [0, 1]
+    assert not parse_top(json.dumps({"top": [1, 1]}), 2).valid
+
+
 def test_parse_grade_and_order_by_grades():
     assert parse_grade('{"grade": 2}') == 2
     assert parse_grade('{"grade": 3}') is None
@@ -95,9 +117,15 @@ class FakeChat:
 
 def test_listwise_reranker_reorders_pool_with_llm_tokens():
     chat = FakeChat(lambda _: json.dumps({"ranking": [2, 1]}))
-    reranked = ListwiseLlmReranker(chat, ["a", "b", "c"], pool=2)("вопрос", [(0, 0.9), (1, 0.8), (2, 0.7)])
+    reranked = ListwiseLlmReranker(chat, ["a", "b", "c"], 2, RANKING_PROMPT)("вопрос", [(0, 0.9), (1, 0.8), (2, 0.7)])
     assert ranked_ids(reranked.ranking) == [1, 0, 2]
     assert reranked.call == LlmCall(0.2, 100, 5) and chat.calls == 1
+
+
+def test_listwise_reranker_uses_prompt_version():
+    chat = FakeChat(lambda request: json.dumps({"grades": [0, 2]} if "grades" in request.messages[0][1] else {}))
+    reranked = ListwiseLlmReranker(chat, ["a", "b"], 2, GRADES_PROMPT)("вопрос", [(0, 0.9), (1, 0.8)])
+    assert ranked_ids(reranked.ranking) == [1, 0]
 
 
 def test_pointwise_reranker_one_request_per_candidate():
