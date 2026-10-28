@@ -138,3 +138,19 @@ def test_openai_chat_keeps_model_identity():
     client._client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body)))
     response = client.complete(generation.answer_request("в?", ["ф"]))
     assert (response.model, response.fingerprint, response.response_id) == ("deepseek-flash", "fp-1", "resp-1")
+
+
+def test_within_tolerance_share():
+    from gigarag.stats import within_tolerance
+    assert within_tolerance([5, 4, 1, 3], [5, 5, 3, 3], 0) == 0.5
+    assert within_tolerance([5, 4, 1, 3], [5, 5, 3, 3], 1) == 0.75
+    assert within_tolerance([], [], 0) == 1.0
+
+
+def test_detection_rates_and_kappa():
+    from gigarag import perturbation
+    scored = [("исходный", 5), ("исходный", 2), ("замена", 1), ("замена", 4), ("факт", 3), ("факт", None)]
+    result = perturbation.detection(scored, original="исходный")
+    assert result.rates == {"исходный": 0.5, "замена": 0.5, "факт": 0.5}
+    perfect = perturbation.detection([("исходный", 5), ("замена", 3), ("факт", 1)], original="исходный")
+    assert perfect.kappa == pytest.approx(1.0) and perfect.rates["исходный"] == 0

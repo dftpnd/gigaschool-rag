@@ -8,8 +8,8 @@
 
 | | R@5 | NDCG@5 | Faithfulness | Answer relevance | Context utilization | Отказ на негативных | Ложный отказ | Поиск, мс | Генерация, мс |
 |---|---|---|---|---|---|---|---|---|---|
-| baseline retrieval (КТ 3) | 66,0 | 60,2 | 5,00 | **4,19** | 4,47 | 100% | 15,0% | 49 | 1 185 |
-| best retrieval (КТ 4) | **71,8** | **67,4** | 5,00 | 3,94 | **4,56** | 100% | **12,5%** | 1 270 | 1 163 |
+| baseline retrieval (КТ 3) | 66,0 | 60,2 | 5,00 | **4,19** | 4,47 | 100% | 15,0% | 51 | 1 185 |
+| best retrieval (КТ 4) | **71,8** | **67,4** | 5,00 | 3,94 | **4,56** | 100% | **12,5%** | 1 265 | 1 163 |
 
 R@5 и NDCG@5 — validation, %; баллы судьи v4 — среднее по validation, шкала 1–5; отказы — по всем 50 вопросам;
 задержка — медиана по 50 вопросам.
@@ -284,8 +284,9 @@ cd scripts && uv run python kt5_annotate.py dev      # или holdout; стра�
 
 - **Ответы LLM** — `data/llm_cache/`, второй прогон судьи — `data/llm_cache/kt5_repeat/`. Из кэша ноутбук исполняется
   за несколько минут без вызовов API.
-- **Выборки разметки** — `gold/kt5_annotation_sample.json` (dev) и `gold/kt5_annotation_holdout.json` (пишет ноутбук),
-  оценки — `gold/kt5_human_labels.json`, `gold/kt5_human_labels_pass1.json`, `gold/kt5_human_labels_holdout.json`.
+- **Выборки разметки** — `data/kt5/annotation_dev.json` и `data/kt5/annotation_holdout.json` (пишет ноутбук; вне git:
+  в них тексты чанков корпуса). Оценки по id ответа — `gold/kt5_human_labels.json`, `gold/kt5_human_labels_pass1.json`,
+  `gold/kt5_human_labels_holdout.json`.
 
 | Модель | Версия |
 |---|---|

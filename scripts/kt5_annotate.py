@@ -49,8 +49,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if self.path != "/labels":
             return self.reply(404, b"not found", "text/plain")
-        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
-        if body.get("id") not in known_ids:
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        except json.JSONDecodeError:
+            return self.reply(400, b"bad json", "text/plain")
+        if not isinstance(body, dict) or body.get("id") not in known_ids:
             return self.reply(400, b"unknown id", "text/plain")
         with write_lock:
             annotation.write_labels(HUMAN_LABELS, annotation.with_label(

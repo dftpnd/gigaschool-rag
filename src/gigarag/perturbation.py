@@ -12,8 +12,10 @@
 
 import random
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from gigarag.patterns import value_spans
+from gigarag.stats import weighted_kappa
 
 # Шаблоны выдуманных утверждений: типичные правки баланса, ссылка на первый фрагмент — как в настоящих ответах
 INVENTED_CLAIMS = (
@@ -23,6 +25,8 @@ INVENTED_CLAIMS = (
     "Ещё в этом обновлении радиус действия увеличен на {n} [1].",
 )
 CLAIM_VALUES = range(13, 98)  # двузначные значения: правдоподобны для правок и редко совпадают со значениями контекста
+SWAP_FACTORS = range(2, 50)   # множители при поиске значения вместо исходного: хватает даже для плотного контекста
+CAUGHT_MAX = 3                # «поймал» — балл не выше 3: по шкале это «часть утверждений не подтверждается»
 
 
 def context_values(passages: Sequence[str]) -> set[str]:
@@ -34,7 +38,7 @@ def _absent_value(value: str, taken: set[str]) -> str:
     """Значение того же вида (целое или с запятой), отличное от исходного и отсутствующее в контексте:
     перебираются value × 2, × 3, … — первое подходящее."""
     whole, _, fraction = value.partition(",")
-    for factor in range(2, 50):
+    for factor in SWAP_FACTORS:
         candidate = str(int(whole) * factor + 1) + (f",{fraction}" if fraction else "")
         if candidate not in taken and candidate != value:
             return candidate
@@ -57,3 +61,21 @@ def add_invented_claim(answer: str, passages: Sequence[str], rng: random.Random)
     claim = rng.choice(INVENTED_CLAIMS).format(n=value)
     first, separator, rest = answer.partition("\n\n")
     return f"{first} {claim}{separator}{rest}"
+
+
+@dataclass(frozen=True)
+class Detection:
+    rates: dict[str, float]  # вид → доля ответов с баллом ≤ CAUGHT_MAX (для исходных — ложная тревога)
+    kappa: float             # Cohen's kappa между меткой по построению и «балл ≤ CAUGHT_MAX»
+
+
+def detection(scored: Sequence[tuple[str, int | None]], original: str) -> Detection:
+    """Насколько судья ловит искажения: пары (вид ответа, балл судьи). Метка по построению — искажён ли ответ
+    (вид ≠ `original`); «поймал» — балл ≤ CAUGHT_MAX, ответ не по формату считается непойманным.
+    Kappa на двух категориях с квадратичными весами совпадает с обычной Cohen's kappa."""
+    caught = [score is not None and score <= CAUGHT_MAX for _, score in scored]
+    kinds = list(dict.fromkeys(kind for kind, _ in scored))
+    rates = {kind: sum(c for (k, _), c in zip(scored, caught, strict=True) if k == kind) /
+             sum(k == kind for k, _ in scored) for kind in kinds}
+    truth = [int(kind != original) for kind, _ in scored]
+    return Detection(rates, weighted_kappa(truth, [int(c) for c in caught], (0, 1)))

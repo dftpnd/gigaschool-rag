@@ -54,7 +54,7 @@ from gigarag.pipeline import HybridRetriever, Pipeline, run_all
 from gigarag.relevance import build_qrels
 from gigarag.retrieval import Bm25Index
 from gigarag.search import ranked_ids
-from gigarag.stats import agreement_rate, weighted_kappa
+from gigarag.stats import agreement_rate, weighted_kappa, within_tolerance
 
 pd.set_option("display.max_colwidth", 160)
 pd.set_option("display.width", 220)
@@ -160,8 +160,9 @@ def annotation_record(key: tuple[str, str]) -> dict:
 
 annotation_records = [annotation_record(key) for key in annotation_keys]
 holdout_records = [annotation_record(key) for key in holdout_keys]
-annotation.write_sample(ROOT / "gold" / "kt5_annotation_sample.json", annotation_records)
-annotation.write_sample(ROOT / "gold" / "kt5_annotation_holdout.json", holdout_records)
+# в data/, а не в gold/: в выборках тексты чанков корпуса; в git — только оценки по id ответа
+annotation.write_sample(DATA / "kt5" / "annotation_dev.json", annotation_records)
+annotation.write_sample(DATA / "kt5" / "annotation_holdout.json", holdout_records)
 pd.DataFrame({"dev": pd.Series([k[0] for k in annotation_keys]).value_counts(),
               "holdout": pd.Series([k[0] for k in holdout_keys]).value_counts()}).rename_axis("ответов в выборке")
 
@@ -254,12 +255,11 @@ def control_scores(cases, version: int) -> dict:
 
 
 def control_summary(cases, scored) -> dict:
-    caught = {case: score is not None and score <= 3 for case, score in scored.items()}
-    by_kind = {kind: 100 * np.mean([caught[c] for c in cases if c[1] == kind]) for kind in (ORIGINAL, SWAPPED, CLAIMED)}
-    truth = [int(c[1] != ORIGINAL) for c in cases]
-    return {"ложная тревога на исходных, %": by_kind[ORIGINAL], f"поймано: {SWAPPED}, %": by_kind[SWAPPED],
-            f"поймано: {CLAIMED}, %": by_kind[CLAIMED],
-            "κ (метка, балл ≤ 3)": weighted_kappa(truth, [int(caught[c]) for c in cases], (0, 1))}
+    detection = perturbation.detection(
+        [(kind, scored[(key, kind)]) for key, kind in cases], original=ORIGINAL)
+    return {"ложная тревога на исходных, %": 100 * detection.rates[ORIGINAL],
+            f"поймано: {SWAPPED}, %": 100 * detection.rates[SWAPPED],
+            f"поймано: {CLAIMED}, %": 100 * detection.rates[CLAIMED], "κ (метка, балл ≤ 3)": detection.kappa}
 
 
 control_dev = control_cases(annotation_keys, human)
@@ -293,11 +293,12 @@ def kappa(verdicts, labels, criterion: str, keys) -> float:
 
 
 def closeness(verdicts, labels, keys, tolerance: int) -> dict[str, float]:
-    """Доля ответов, где судья и человек разошлись не больше чем на `tolerance` баллов, %. Kappa при почти
-    постоянной оценке одного из оценщиков ≈ 0 даже при почти полном совпадении — доли показывают это рядом."""
-    return {c: 100 * np.mean([abs(verdicts[(c, key)].score - labels[f"{key[0]}|{key[1]}"][c]) <= tolerance
-                              for key in keys if verdicts[(c, key)].score is not None])
-            for c in judge.CRITERIA}
+    """Доля ответов, где судья и человек разошлись не больше чем на `tolerance` баллов, % (по критериям)."""
+    def share(criterion: str) -> float:
+        pairs = [(verdicts[(criterion, key)].score, labels[f"{key[0]}|{key[1]}"][criterion]) for key in keys]
+        pairs = [(j, h) for j, h in pairs if j is not None]
+        return 100 * within_tolerance([j for j, _ in pairs], [h for _, h in pairs], tolerance)
+    return {c: share(c) for c in judge.CRITERIA}
 
 
 kappas = pd.DataFrame({(f"v{version}", source): {c: kappa(first, labels, c, annotation_keys) for c in judge.CRITERIA}
@@ -389,13 +390,15 @@ summary.round(2)
 # У DeepSeek нет неизменяемого ID версии модели: алиас `deepseek-flash` (DeepSeek-V4.1-Flash) обновляется
 # на сервере. Поэтому результаты, на которых построены выводы, сохраняются в git: ответы генератора
 # (`gold/kt5_answers.jsonl`) и все вердикты финального судьи (`gold/kt5_verdicts.jsonl`) — с `system_fingerprint`
-# и id ответа API там, где они записаны (поле появилось в кэше после генерации ответов и первых версий судьи).
+# и id ответа API там, где они записаны (поле появилось в кэше после генерации ответов и первых версий судьи);
+# `requested_model` — алиас из запроса, `model` — что вернул API (пусто, если не записано).
 # Повторный запуск после обновления модели можно сравнить с этими файлами построчно.
 
 # %%
 atomic_write_jsonl(ROOT / "gold" / "kt5_answers.jsonl", [
     {"config": name, "qid": qid, "answer": answers[(name, qid)], "context": contexts[name][qid],
-     "model": responses[(name, qid)].model or generation.MODEL, "fingerprint": responses[(name, qid)].fingerprint,
+     "requested_model": generation.MODEL, "model": responses[(name, qid)].model,
+     "fingerprint": responses[(name, qid)].fingerprint,
      "response_id": responses[(name, qid)].response_id, "prompt_version": generation.PROMPT_VERSION}
     for name, qid in answer_keys])
 atomic_write_jsonl(ROOT / "gold" / "kt5_verdicts.jsonl", [

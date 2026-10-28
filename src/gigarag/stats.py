@@ -63,3 +63,10 @@ def weighted_kappa(first: Sequence[int], second: Sequence[int], categories: Sequ
     disagreement = sum(weight[i][j] * observed[i][j] for i in range(k) for j in range(k))
     expected = sum(weight[i][j] * rows[i] * columns[j] for i in range(k) for j in range(k))
     return 1 - disagreement / expected if expected else float("nan")
+
+
+def within_tolerance(first: Sequence[int], second: Sequence[int], tolerance: int) -> float:
+    """Доля пар, разошедшихся не больше чем на `tolerance` баллов: Σ [|a_i − b_i| ≤ tolerance] / n.
+    Kappa при почти постоянной оценке одного из оценщиков ≈ 0 даже при почти полном совпадении — эта доля
+    показывает совпадение рядом с kappa."""
+    return sum(abs(a - b) <= tolerance for a, b in zip(first, second, strict=True)) / len(first) if first else 1.0

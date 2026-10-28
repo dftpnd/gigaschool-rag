@@ -20,9 +20,11 @@ OFFTOPIC_SHARE = 0.2     # офтоп Telegram в доле от числа те�
 SEED = 42
 
 # КТ 5: ручная разметка ответов
-# выборка (пишет ноутбук kt5_generation) → файл оценок; dev — подбор версии судьи, holdout — итоговая kappa
+# выборка → файл оценок; dev — подбор версии судьи, holdout — итоговая kappa. Выборки пишет ноутбук kt5_generation
+# в data/: в них тексты чанков корпуса (контент третьих сторон), а в git — только оценки по id ответа.
+KT5_DATA = DATA / "kt5"
 ANNOTATION_SETS = {
-    "dev": (GOLD_DIR / "kt5_annotation_sample.json", GOLD_DIR / "kt5_human_labels.json"),
-    "holdout": (GOLD_DIR / "kt5_annotation_holdout.json", GOLD_DIR / "kt5_human_labels_holdout.json"),
+    "dev": (KT5_DATA / "annotation_dev.json", GOLD_DIR / "kt5_human_labels.json"),
+    "holdout": (KT5_DATA / "annotation_holdout.json", GOLD_DIR / "kt5_human_labels_holdout.json"),
 }
 ANNOTATION_HOST, ANNOTATION_PORT = "0.0.0.0", 8766  # все интерфейсы: разметка с другого устройства через VPN
