@@ -186,3 +186,12 @@ def test_reuse_labels_only_for_unchanged_content():
     same, changed = RECORD, {**RECORD, "id": "baseline retrieval|q02", "answer": "x"}
     other = annotation.with_label({}, {**changed, "answer": "y"}, {"relevance": 2})
     assert set(annotation.reuse_labels([old, other], [same, changed])) == {RECORD["id"]}
+
+
+def test_loss_stage_splits_retrieval_and_generation():
+    from gigarag.answer_eval import ANSWERED, GENERATION_LOSS, RETRIEVAL_LOSS, loss_stage
+    assert loss_stage(0.0, abstained=False, faithful=True) == RETRIEVAL_LOSS
+    assert loss_stage(0.0, abstained=True, faithful=True) == RETRIEVAL_LOSS  # отказ без контекста — вина поиска
+    assert loss_stage(0.5, abstained=True, faithful=True) == GENERATION_LOSS
+    assert loss_stage(1.0, abstained=False, faithful=False) == GENERATION_LOSS
+    assert loss_stage(0.5, abstained=False, faithful=True) == ANSWERED

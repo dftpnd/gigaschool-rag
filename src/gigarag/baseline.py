@@ -8,6 +8,7 @@ BGE-M3; dense — BGE-M3 по чанку с префиксом метаданн�
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 import gigarag.chunking
@@ -16,7 +17,15 @@ import gigarag.metadata
 import gigarag.noise
 import gigarag.patterns
 from gigarag import cleaning, metadata, tokens
-from gigarag.cache import CacheStore, code_fingerprint, load_or_compute, read_parquet, write_parquet
+from gigarag.cache import (
+    CacheStore,
+    code_fingerprint,
+    load_or_compute,
+    read_npy,
+    read_parquet,
+    write_npy,
+    write_parquet,
+)
 from gigarag.chunking import (
     Chunk,
     ChunkerResources,
@@ -27,8 +36,10 @@ from gigarag.chunking import (
     frame_chunks,
 )
 from gigarag.corpus import Document
-from gigarag.embeddings import EmbedderSpec
+from gigarag.embeddings import EmbedderSpec, encode, load_sentence_model
 from gigarag.experiment import docs_fingerprint, texts_fingerprint
+from gigarag.pipeline import HybridRetriever
+from gigarag.retrieval import Bm25Index
 
 EMBEDDER = EmbedderSpec("BAAI/bge-m3", "5617a9f61b028005a4858fdac845db406aefb181", 567)
 CHUNKER = ChunkerSpec("recursive", chunk_size=512)
@@ -82,3 +93,25 @@ def build_corpus(raw_docs: Sequence[Document], tokenizer, cache: CacheStore) -> 
                    tokenizer=EMBEDDER.revision),
         make_meta, load=read_parquet, save=write_parquet)
     return BaselineCorpus(clean, chunks, meta)
+
+
+@dataclass(frozen=True)
+class SearchStack:
+    """Поиск baseline целиком: корпус чанков, эмбеддер запросов и гибридный ретривер над их векторами."""
+    corpus: BaselineCorpus
+    embedder: object  # SentenceTransformer: тип не импортируется, чтобы модуль грузился без torch
+    retriever: HybridRetriever
+
+    def encode_queries(self, texts) -> np.ndarray:
+        return encode(self.embedder, list(texts), batch_size=len(texts))
+
+
+def load_search_stack(raw_docs: Sequence[Document], cache: CacheStore) -> SearchStack:
+    """Корпус, BGE-M3 и гибридный ретривер baseline; чанки, метаданные и векторы — из кэша, как в КТ 4–5."""
+    corpus = build_corpus(raw_docs, tokens.load_tokenizer(EMBEDDER.name, EMBEDDER.revision), cache)
+    embedder = load_sentence_model(EMBEDDER.name, EMBEDDER.revision, max_seq_length=EMBEDDER.max_seq_length, half=True)
+    vectors = load_or_compute(
+        cache.path("vectors", "npy", texts=texts_fingerprint(corpus.dense_texts), half=True, **EMBEDDER.cache_params()),
+        lambda: encode(embedder, corpus.dense_texts), load=read_npy, save=write_npy)
+    retriever = HybridRetriever(vectors, Bm25Index.build(corpus.texts, BM25_K1, BM25_B), ALPHA, POOL)
+    return SearchStack(corpus, embedder, retriever)
