@@ -75,3 +75,17 @@ def summary_by_type(verdicts: list[AnswerVerdict]) -> pd.DataFrame:
     overall = table.groupby("model").apply(summarize, include_groups=False)
     overall.index = pd.MultiIndex.from_tuples([(m, "ВСЕГО") for m in overall.index], names=["model", "qtype"])
     return pd.concat([per_type, overall]).sort_index().round(1)
+
+
+RETRIEVAL_LOSS, GENERATION_LOSS, ANSWERED = "потеря на поиске", "потеря на генерации", "ответ"
+
+
+def loss_stage(recall_at_5: float, abstained: bool, faithful: bool) -> str:
+    """Где система теряет вопрос, у которого ответ в корпусе есть:
+    - на поиске — в топ-5 нет ни одного чанка с доказательством (R@5 = 0): генератору не из чего ответить;
+    - на генерации — доказательство в топ-5 есть, но модель отказалась или ответ недостоверен;
+    - ответ — доказательство найдено, ответ содержательный и достоверный (полнота ответа не проверяется:
+      судья релевантности не валидирован)."""
+    if recall_at_5 == 0:
+        return RETRIEVAL_LOSS
+    return GENERATION_LOSS if abstained or not faithful else ANSWERED
